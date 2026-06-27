@@ -26,8 +26,10 @@ def _break_even_stop(request: ProfitPlanRequest, current_r: Optional[float]) -> 
     return max(existing_stop, position.entry_price)
 
 
-def _trailing_stop(request: ProfitPlanRequest) -> Optional[float]:
+def _trailing_stop(request: ProfitPlanRequest, current_r: Optional[float]) -> Optional[float]:
     position = request.position
+    if current_r is None or current_r < request.break_even_trigger_r:
+        return None
     if not position.highest_price_since_entry:
         return None
     trailing_stop = position.highest_price_since_entry * (1 - request.trailing_stop_pct)
@@ -69,7 +71,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
 
     break_even_stop = _break_even_stop(request, current_r)
-    trailing_stop = _trailing_stop(request)
+    trailing_stop = _trailing_stop(request, current_r)
     recommended_stop = None
     if break_even_stop is not None or trailing_stop is not None:
         recommended_stop = max(break_even_stop or 0, trailing_stop or 0)
