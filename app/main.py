@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from app.models import HealthData, ProfitPlanData, ProfitPlanRequest, StandardAgentResponse
+from app.models import (
+    HealthData,
+    ProfitPlanData,
+    ProfitPlanRequest,
+    StandardAgentResponse,
+)
 from app.service import build_profit_plan
+from app.system_contract import router as system_contract_router
 
 
 app = FastAPI(
@@ -11,6 +17,7 @@ app = FastAPI(
     description="Profit-taking advisory service for the multi-agent trading system.",
     version="0.1.0",
 )
+app.include_router(system_contract_router)
 
 
 @app.get("/health", response_model=StandardAgentResponse[HealthData])
