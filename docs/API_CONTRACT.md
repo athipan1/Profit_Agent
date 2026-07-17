@@ -47,9 +47,53 @@ POST /profit/monitor
 POST /profit/exit-signal
 ```
 
+All profit endpoints accept the same `ProfitPlanRequest` and return `ProfitPlanData` inside the service response envelope.
+
+## Position Peak Contract
+
+The caller is responsible for sending the highest observed market price for the current position lifecycle:
+
+```json
+{
+  "position": {
+    "symbol": "ADBE",
+    "quantity": 20,
+    "entry_price": 100.0,
+    "current_price": 120.0,
+    "stop_loss": 90.0,
+    "highest_price_since_entry": 125.0
+  }
+}
+```
+
+`highest_price_since_entry` must be tracked outside this service because `Profit_Agent` is stateless and does not persist positions or market-price history. `Database_Agent` is the source of truth and `Manager_Agent` is expected to forward the stored value.
+
+When the field is omitted or explicitly set to `null`:
+
+1. The endpoint still returns a successful advisory response.
+2. The existing fallback remains `max(entry_price, current_price)`.
+3. The service adds the following entry to `data.warnings`:
+
+```text
+highest_price_since_entry was not provided; trailing stop uses max(entry_price, current_price) as a fallback and may be understated because Profit_Agent does not track price history
+```
+
+The warning means the trailing-stop recommendation was produced from incomplete price history and may be lower than the stop that complete history would produce. Downstream callers must not discard this warning.
+
+The warning applies consistently to:
+
+```http
+POST /profit/plan
+POST /profit/monitor
+POST /profit/exit-signal
+```
+
+This is a final defensive layer. It does not replace the upstream responsibility to store and forward the real position peak.
+
 ## Notes
 
 1. This service provides profit-taking context for other agents.
 2. Runtime readiness is reported through `/ready`.
 3. Version and schema metadata are reported through `/version`.
 4. Existing profit endpoints keep their current response models.
+5. Missing position-peak history causes a successful response with a warning, not an error.
