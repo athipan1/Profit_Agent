@@ -5,6 +5,13 @@ from typing import List, Optional
 from app.models import ProfitAction, ProfitActionItem, ProfitPlanData, ProfitPlanRequest
 
 
+HIGHEST_PRICE_FALLBACK_WARNING = (
+    "highest_price_since_entry was not provided; trailing stop uses "
+    "max(entry_price, current_price) as a fallback and may be understated "
+    "because Profit_Agent does not track price history"
+)
+
+
 def _round_price(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
@@ -45,6 +52,9 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
     current_r = _r_multiple(request)
     actions: List[ProfitActionItem] = []
     warnings: List[str] = []
+
+    if position.highest_price_since_entry_inferred:
+        warnings.append(HIGHEST_PRICE_FALLBACK_WARNING)
 
     if current_r is None:
         warnings.append("risk_per_share is missing; R-multiple based take-profit rules are limited")
