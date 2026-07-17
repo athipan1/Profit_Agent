@@ -13,6 +13,32 @@ It does **not** place sell orders. It returns suggested actions for `Manager_Age
 - Recommend partial take profit
 - Return advisory exit signal metadata
 
+## Position peak responsibility
+
+`Profit_Agent` is stateless. It does not store positions, market-price history, or the highest price observed after entry.
+
+The caller must track and send `position.highest_price_since_entry` for the current position lifecycle. The expected integration flow is:
+
+```text
+Database_Agent stores the position peak
+  -> Manager_Agent reads and forwards it
+  -> Profit_Agent calculates the trailing-stop advisory
+```
+
+When the caller omits the field or sends `null`, the request is still accepted. For backward compatibility, the service continues to use:
+
+```text
+max(entry_price, current_price)
+```
+
+as a fallback. The response then includes this warning instead of silently presenting the fallback as complete history:
+
+```text
+highest_price_since_entry was not provided; trailing stop uses max(entry_price, current_price) as a fallback and may be understated because Profit_Agent does not track price history
+```
+
+A successful response with this warning is degraded advisory output, not an error. Downstream agents should preserve and review the warning before acting on the recommended stop.
+
 ## API
 
 ### Health
@@ -32,7 +58,8 @@ curl -X POST http://localhost:8011/profit/plan \
       "quantity": 20,
       "entry_price": 100,
       "current_price": 120,
-      "stop_loss": 90
+      "stop_loss": 90,
+      "highest_price_since_entry": 125
     },
     "first_take_profit_r": 2.0,
     "partial_exit_pct": 0.30
@@ -52,7 +79,8 @@ Example response fields:
       "quantity": 6,
       "reason": "Position reached first take-profit target at 2.0R"
     }
-  ]
+  ],
+  "warnings": []
 }
 ```
 
@@ -64,6 +92,8 @@ POST /profit/plan
 POST /profit/monitor
 POST /profit/exit-signal
 ```
+
+All three profit endpoints use the same position model and return the same missing-peak warning behavior.
 
 ## Local development
 
