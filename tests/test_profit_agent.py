@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models import ProfitAction, ProfitPlanRequest, ProfitPosition
-from app.service import build_profit_plan
+from app.service import HIGHEST_PRICE_FALLBACK_WARNING, build_profit_plan
 
 
 client = TestClient(app)
@@ -30,6 +30,7 @@ def test_stop_breach_exits_all():
     )
     assert result.primary_action == ProfitAction.EXIT_ALL
     assert result.actions[0].quantity == 10
+    assert HIGHEST_PRICE_FALLBACK_WARNING in result.warnings
 
 
 def test_first_take_profit_partial_exit():
@@ -69,6 +70,7 @@ def test_break_even_or_trailing_stop_move_stop():
     assert any(action.action == ProfitAction.MOVE_STOP for action in result.actions)
     move_stop = next(action for action in result.actions if action.action == ProfitAction.MOVE_STOP)
     assert move_stop.recommended_stop == 110.4
+    assert HIGHEST_PRICE_FALLBACK_WARNING not in result.warnings
 
 
 def test_hold_when_no_profit_rule_triggered():
@@ -96,6 +98,7 @@ def test_profit_plan_endpoint():
                 "entry_price": 100,
                 "current_price": 120,
                 "stop_loss": 90,
+                "highest_price_since_entry": 125,
             },
             "first_take_profit_r": 2.0,
             "partial_exit_pct": 0.30,
@@ -106,3 +109,28 @@ def test_profit_plan_endpoint():
     assert payload["status"] == "success"
     assert payload["data"]["primary_action"] == "partial_exit"
     assert payload["data"]["symbol"] == "ADBE"
+    assert HIGHEST_PRICE_FALLBACK_WARNING not in payload["data"]["warnings"]
+
+
+def test_profit_plan_endpoint_warns_when_highest_price_is_missing():
+    response = client.post(
+        "/profit/plan",
+        json={
+            "position": {
+                "symbol": "ADBE",
+                "quantity": 20,
+                "entry_price": 100,
+                "current_price": 120,
+                "stop_loss": 90,
+            },
+            "first_take_profit_r": 2.0,
+            "partial_exit_pct": 0.30,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["error"] is None
+    assert payload["data"]["symbol"] == "ADBE"
+    assert HIGHEST_PRICE_FALLBACK_WARNING in payload["data"]["warnings"]
