@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 
 T = TypeVar("T")
@@ -34,15 +34,23 @@ class ProfitPosition(BaseModel):
     unrealized_pl_pct: Optional[float] = None
     strategy_bucket: Optional[str] = None
 
+    _highest_price_since_entry_inferred: bool = PrivateAttr(default=False)
+
     @model_validator(mode="after")
     def infer_risk_per_share(self) -> "ProfitPosition":
         if self.risk_per_share is None and self.stop_loss is not None and self.entry_price > self.stop_loss:
             self.risk_per_share = self.entry_price - self.stop_loss
         if self.highest_price_since_entry is None:
             self.highest_price_since_entry = max(self.entry_price, self.current_price)
+            self._highest_price_since_entry_inferred = True
         if self.unrealized_pl_pct is None:
             self.unrealized_pl_pct = (self.current_price - self.entry_price) / self.entry_price
         return self
+
+    @property
+    def highest_price_since_entry_inferred(self) -> bool:
+        """Whether the service had to infer the peak because the caller omitted it."""
+        return self._highest_price_since_entry_inferred
 
 
 class ProfitPlanRequest(BaseModel):
