@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -112,9 +113,17 @@ def test_profit_plan_endpoint():
     assert HIGHEST_PRICE_FALLBACK_WARNING not in payload["data"]["warnings"]
 
 
-def test_profit_plan_endpoint_warns_when_highest_price_is_missing():
+@pytest.mark.parametrize("path", ["/profit/plan", "/profit/monitor", "/profit/exit-signal"])
+@pytest.mark.parametrize(
+    "peak_payload",
+    [
+        pytest.param({}, id="field-omitted"),
+        pytest.param({"highest_price_since_entry": None}, id="explicit-null"),
+    ],
+)
+def test_profit_endpoints_warn_when_highest_price_is_unavailable(path, peak_payload):
     response = client.post(
-        "/profit/plan",
+        path,
         json={
             "position": {
                 "symbol": "ADBE",
@@ -122,6 +131,7 @@ def test_profit_plan_endpoint_warns_when_highest_price_is_missing():
                 "entry_price": 100,
                 "current_price": 120,
                 "stop_loss": 90,
+                **peak_payload,
             },
             "first_take_profit_r": 2.0,
             "partial_exit_pct": 0.30,
