@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from app.config import market_data_max_age_seconds
 from app.models import ProfitAction, ProfitActionItem, ProfitPlanData, ProfitPlanRequest
+from app.services.adaptive_policy import (
+    AdaptiveProfitPolicy,
+    evaluate_adaptive_policy,
+    static_policy,
+)
 
 
 HIGHEST_PRICE_FALLBACK_WARNING = (
@@ -91,6 +98,83 @@ def _base_warnings(request: ProfitPlanRequest) -> List[str]:
     return _unique_warnings(warnings)
 
 
+def _data_quality(request: ProfitPlanRequest) -> Dict[str, bool]:
+    explicit = request.data_quality
+    context = request.market_context
+    if explicit is not None:
+        return explicit.model_dump()
+
+    market_price_fresh = context is None
+    if context is not None and context.observed_at is not None:
+        age_seconds = (
+            datetime.now(timezone.utc) - context.observed_at.astimezone(timezone.utc)
+        ).total_seconds()
+        market_price_fresh = 0 <= age_seconds <= market_data_max_age_seconds()
+    return {
+        "market_price_fresh": market_price_fresh,
+        "peak_history_complete": not request.position.highest_price_since_entry_inferred,
+        "position_version_current": True,
+        "emergency_halt_active": False,
+    }
+
+
+def _quality_block_reason(
+    request: ProfitPlanRequest,
+    quality: Dict[str, bool],
+) -> Optional[str]:
+    if not quality["market_price_fresh"] and (
+        request.market_context is not None or request.data_quality is not None
+    ):
+        return "market data is stale or has no freshness evidence"
+    if request.data_quality is not None and not quality["peak_history_complete"]:
+        return "peak price history is incomplete"
+    if request.data_quality is not None and not quality["position_version_current"]:
+        return "position version is stale"
+    return None
+
+
+def _review_plan(
+    request: ProfitPlanRequest,
+    *,
+    current_r: Optional[float],
+    warnings: List[str],
+    quality: Dict[str, bool],
+    reason: str,
+    trigger: str,
+    policy: AdaptiveProfitPolicy,
+) -> ProfitPlanData:
+    position = request.position
+    review_warnings = _unique_warnings([*warnings, reason])
+    return ProfitPlanData(
+        symbol=position.symbol.upper(),
+        current_r_multiple=None if current_r is None else round(current_r, 4),
+        unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+        primary_action=ProfitAction.REVIEW,
+        actions=[
+            ProfitActionItem(
+                action=ProfitAction.REVIEW,
+                symbol=position.symbol.upper(),
+                quantity=0,
+                reason=reason,
+                confidence_score=1.0,
+                metadata={"trigger": trigger, "advisory_only": True},
+            )
+        ],
+        warnings=review_warnings,
+        trigger=trigger,
+        requires_risk_approval=False,
+        advisory_only=True,
+        decision_status="blocked",
+        data_quality=quality,
+        metadata={
+            "advisory_only": True,
+            "requires_risk_approval": False,
+            "request_metadata": request.metadata,
+        },
+        **policy.response_fields(request),
+    )
+
+
 def _decision_fields(
     request: ProfitPlanRequest,
     *,
@@ -130,10 +214,7 @@ def _pending_profit_target(
 
     # Targets are intentionally sequential. Crossing both targets initially
     # proposes TP1 first; TP2 can only be proposed after TP1 is confirmed by DB.
-    if (
-        current_r >= request.first_take_profit_r
-        and not lifecycle.first_target_executed
-    ):
+    if current_r >= request.first_take_profit_r and not lifecycle.first_target_executed:
         return "first_take_profit", "first_take_profit"
     if (
         current_r >= request.second_take_profit_r
@@ -148,6 +229,19 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
     position = request.position
     actions: List[ProfitActionItem] = []
     warnings = _base_warnings(request)
+    quality = _data_quality(request)
+    base_policy = static_policy(request)
+
+    if quality["emergency_halt_active"]:
+        return _review_plan(
+            request,
+            current_r=None,
+            warnings=warnings,
+            quality=quality,
+            reason="emergency halt is active",
+            trigger="emergency_halt",
+            policy=base_policy,
+        )
 
     # Hard stop-loss safety has priority over every profit calculation.
     if position.stop_loss is not None and position.current_price <= position.stop_loss:
@@ -182,6 +276,8 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 "requires_risk_approval": True,
                 "request_metadata": request.metadata,
             },
+            data_quality=quality,
+            **base_policy.response_fields(request),
             **_decision_fields(
                 request,
                 decision_type="hard_stop_exit",
@@ -234,12 +330,84 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 "raw_trailing_stop": recommended_stop,
                 "request_metadata": request.metadata,
             },
+            data_quality=quality,
+            **base_policy.response_fields(request),
             **_decision_fields(
                 request,
                 decision_type="trailing_stop_exit",
                 suffix="trailing-stop",
             ),
         )
+
+    quality_reason = _quality_block_reason(request, quality)
+    if quality_reason is not None:
+        return _review_plan(
+            request,
+            current_r=current_r,
+            warnings=warnings,
+            quality=quality,
+            reason=quality_reason,
+            trigger="data_quality_block",
+            policy=base_policy,
+        )
+
+    policy = evaluate_adaptive_policy(request)
+    policy_fields = policy.response_fields(request)
+    effective_request = request.model_copy(
+        update={
+            "first_take_profit_r": policy.first_take_profit_r,
+            "second_take_profit_r": policy.second_take_profit_r,
+            "partial_exit_pct": policy.partial_exit_pct,
+            "trailing_stop_pct": policy.trailing_stop_pct,
+        }
+    )
+    adjusted_trailing_stop = calculate_raw_trailing_stop(effective_request, current_r)
+    if detect_trailing_stop_breach(effective_request, adjusted_trailing_stop):
+        recommended_stop = _round_price(adjusted_trailing_stop)
+        actions.append(
+            ProfitActionItem(
+                action=ProfitAction.EXIT_ALL,
+                symbol=position.symbol.upper(),
+                quantity=position.quantity,
+                recommended_stop=recommended_stop,
+                reason="Current price is at or below the adaptive trailing stop",
+                confidence_score=0.92,
+                metadata={
+                    "trigger": "trailing_stop_breach",
+                    "advisory_only": True,
+                    "requires_risk_approval": True,
+                    "policy_source": policy.source,
+                },
+            )
+        )
+        return ProfitPlanData(
+            symbol=position.symbol.upper(),
+            current_r_multiple=None if current_r is None else round(current_r, 4),
+            unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+            primary_action=ProfitAction.EXIT_ALL,
+            actions=actions,
+            warnings=warnings,
+            trigger="trailing_stop_breach",
+            recommended_stop=recommended_stop,
+            requires_risk_approval=True,
+            advisory_only=True,
+            data_quality=quality,
+            metadata={
+                "advisory_only": True,
+                "requires_risk_approval": True,
+                "raw_trailing_stop": recommended_stop,
+                "request_metadata": request.metadata,
+            },
+            **policy.response_fields(request),
+            **_decision_fields(
+                request,
+                decision_type="trailing_stop_exit",
+                suffix="trailing-stop",
+            ),
+        )
+
+    request = effective_request
+    raw_trailing_stop = adjusted_trailing_stop
 
     break_even_stop = _break_even_stop(request, current_r)
     recommended_stop = calculate_recommended_stop(
@@ -309,11 +477,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
 
     primary_action = next(
-        (
-            item.action
-            for item in actions
-            if item.action != ProfitAction.MOVE_STOP
-        ),
+        (item.action for item in actions if item.action != ProfitAction.MOVE_STOP),
         actions[0].action,
     )
     requires_risk_approval = primary_action != ProfitAction.HOLD
@@ -360,5 +524,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             "raw_trailing_stop": _round_price(raw_trailing_stop),
             "request_metadata": request.metadata,
         },
+        data_quality=quality,
+        **policy_fields,
         **decision_fields,
     )

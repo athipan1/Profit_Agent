@@ -13,6 +13,7 @@ It does **not** place sell orders. It returns suggested actions for `Manager_Age
 - Recommend partial take profit
 - Suppress already executed take-profit stages using Database-owned lifecycle state
 - Return advisory exit signal metadata
+- Apply a deterministic regime-aware policy only after hard safety checks
 
 Hard stop-loss and active trailing-stop breaches always take priority over
 break-even and take-profit advice. A trailing threshold is not discarded when
@@ -175,6 +176,31 @@ default is `reject`. Both non-reject policies add a response warning;
 `recalculate` also replaces the supplied value with the derived risk. Manager
 must preserve warnings and still send every actionable advisory through
 `Risk_Agent` before `Execution_Agent`.
+
+## Adaptive profit policy
+
+Manager may send `market_context` from the versioned Market Regime and
+Technical projections. The deterministic `deterministic_adaptive_v1` policy
+can widen a trail in a bull/strong-trend regime, use ATR evidence in a volatile
+regime, or tighten targets and stops in a bear/weak-trend regime. It returns the
+base and adjusted values plus `adjustment_reasons`; no LLM chooses execution
+numbers.
+
+Emergency halt, hard stop-loss, the base trailing stop, stale market data,
+incomplete peak history, and stale position version all take precedence. An
+explicitly failed `data_quality` check returns `primary_action=review` and
+`decision_status=blocked`, with no executable decision identity. An adaptive
+policy can create a tighter trailing breach, but can never hide a breach of the
+base policy.
+
+```env
+PROFIT_MARKET_DATA_MAX_AGE_SECONDS=120
+```
+
+When adaptive context is present, callers must either provide a timezone-aware
+`market_context.observed_at` within this age or explicitly attest freshness in
+`data_quality.market_price_fresh`. Legacy requests without adaptive context
+retain the static policy during the compatibility window.
 
 ## Local development
 

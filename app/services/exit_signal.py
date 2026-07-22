@@ -47,4 +47,10 @@ def build_exit_signal(request: ProfitPlanRequest) -> ProfitExitSignalData:
         decision_type=assessment.decision_type,
         position_version=assessment.position_version,
         next_lifecycle_state=assessment.next_lifecycle_state,
+        decision_status=assessment.decision_status,
+        data_quality=assessment.data_quality,
+        policy_source=assessment.policy_source,
+        base_trailing_stop_pct=assessment.base_trailing_stop_pct,
+        adjusted_trailing_stop_pct=assessment.adjusted_trailing_stop_pct,
+        adjustment_reasons=assessment.adjustment_reasons,
     )
