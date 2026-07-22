@@ -202,6 +202,28 @@ When adaptive context is present, callers must either provide a timezone-aware
 `data_quality.market_price_fresh`. Legacy requests without adaptive context
 retain the static policy during the compatibility window.
 
+## Decimal and market constraints
+
+All price, R-multiple, target, trailing-stop, and quantity arithmetic uses
+`Decimal` in the domain layer. Callers may provide exact constraints:
+
+```json
+{
+  "market_constraints": {
+    "price_increment": "0.01",
+    "quantity_increment": "0.000001",
+    "minimum_order_quantity": "0.000001"
+  }
+}
+```
+
+Prices and quantities are floored to an actual multiple of their increment.
+Partial exits never exceed the Database-owned remaining quantity. If rounding
+would produce less than the minimum order, Profit returns a blocked review and
+does not emit a zero-quantity partial exit. Constraint values serialize as
+exact decimal strings; existing monetary and quantity output fields remain JSON
+numbers for v2 compatibility.
+
 ## Local development
 
 ```bash

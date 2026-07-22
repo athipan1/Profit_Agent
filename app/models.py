@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
-import math
 import os
 import re
 from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
@@ -26,8 +26,8 @@ from app.config import (
 T = TypeVar("T")
 
 RISK_MISMATCH_POLICIES = {"reject", "warn", "recalculate"}
-RISK_MISMATCH_REL_TOL = 1e-6
-RISK_MISMATCH_ABS_TOL = 1e-6
+RISK_MISMATCH_REL_TOL = Decimal("0.000001")
+RISK_MISMATCH_ABS_TOL = Decimal("0.000001")
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9.-]{0,14}$")
 POSITION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$")
 
@@ -46,6 +46,16 @@ def _risk_mismatch_policy() -> str:
         supported = ", ".join(sorted(RISK_MISMATCH_POLICIES))
         raise ValueError(f"PROFIT_RISK_MISMATCH_POLICY must be one of: {supported}")
     return policy
+
+
+def _decimal_close(left: Any, right: Any) -> bool:
+    left_decimal = Decimal(str(left))
+    right_decimal = Decimal(str(right))
+    tolerance = max(
+        RISK_MISMATCH_ABS_TOL,
+        abs(right_decimal) * RISK_MISMATCH_REL_TOL,
+    )
+    return abs(left_decimal - right_decimal) <= tolerance
 
 
 class ProfitAction(str, Enum):
@@ -104,6 +114,23 @@ class ProfitDataQuality(StrictModel):
     emergency_halt_active: bool = False
 
 
+class MarketConstraints(StrictModel):
+    """Broker-facing increments serialized as exact decimal strings."""
+
+    price_increment: Decimal = Field(default=Decimal("0.01"), gt=0)
+    quantity_increment: Decimal = Field(default=Decimal("0.000001"), gt=0)
+    minimum_order_quantity: Decimal = Field(default=Decimal("0.000001"), gt=0)
+
+    @model_validator(mode="after")
+    def validate_quantity_constraints(self) -> "MarketConstraints":
+        units = self.minimum_order_quantity / self.quantity_increment
+        if units != units.to_integral_value():
+            raise ValueError(
+                "minimum_order_quantity must be a multiple of quantity_increment"
+            )
+        return self
+
+
 class ProfitPosition(StrictModel):
     symbol: str
     side: PositionSide = PositionSide.LONG
@@ -146,15 +173,12 @@ class ProfitPosition(StrictModel):
             raise ValueError("highest_price_since_entry must be at least current_price")
 
         if self.stop_loss is not None:
-            expected_risk = self.entry_price - self.stop_loss
+            expected_risk = Decimal(str(self.entry_price)) - Decimal(
+                str(self.stop_loss)
+            )
             if self.risk_per_share is None:
-                self.risk_per_share = expected_risk
-            elif not math.isclose(
-                self.risk_per_share,
-                expected_risk,
-                rel_tol=RISK_MISMATCH_REL_TOL,
-                abs_tol=RISK_MISMATCH_ABS_TOL,
-            ):
+                self.risk_per_share = float(expected_risk)
+            elif not _decimal_close(self.risk_per_share, expected_risk):
                 policy = _risk_mismatch_policy()
                 message = (
                     "risk_per_share does not match entry_price - stop_loss; "
@@ -164,7 +188,7 @@ class ProfitPosition(StrictModel):
                     raise ValueError(message)
                 self._risk_per_share_warning = f"{message}; policy={policy}"
                 if policy == "recalculate":
-                    self.risk_per_share = expected_risk
+                    self.risk_per_share = float(expected_risk)
 
         if self.unrealized_pl_pct is None:
             self.unrealized_pl_pct = (
@@ -222,6 +246,7 @@ class ProfitPlanRequest(StrictModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     market_context: Optional[ProfitMarketContext] = None
     data_quality: Optional[ProfitDataQuality] = None
+    market_constraints: MarketConstraints = Field(default_factory=MarketConstraints)
 
     @field_validator("schema_version")
     @classmethod
@@ -239,14 +264,22 @@ class ProfitPlanRequest(StrictModel):
             raise ValueError(
                 "second_take_profit_r must be greater than first_take_profit_r"
             )
-        if self.lifecycle is not None and not math.isclose(
-            self.lifecycle.remaining_quantity,
-            self.position.quantity,
-            rel_tol=RISK_MISMATCH_REL_TOL,
-            abs_tol=RISK_MISMATCH_ABS_TOL,
+        if self.lifecycle is not None and not _decimal_close(
+            self.lifecycle.remaining_quantity, self.position.quantity
         ):
             raise ValueError(
                 "lifecycle.remaining_quantity must match position.quantity"
+            )
+        quantity = Decimal(str(self.position.quantity))
+        constraints = self.market_constraints
+        if quantity < constraints.minimum_order_quantity:
+            raise ValueError(
+                "position.quantity must be at least minimum_order_quantity"
+            )
+        units = quantity / constraints.quantity_increment
+        if units != units.to_integral_value():
+            raise ValueError(
+                "position.quantity must be a multiple of quantity_increment"
             )
         return self
 
@@ -286,6 +319,7 @@ class ProfitPlanData(StrictModel):
     adjusted_second_take_profit_r: float = Field(gt=0)
     adjusted_partial_exit_pct: float = Field(gt=0, le=1)
     adjustment_reasons: List[str] = Field(default_factory=list)
+    market_constraints: MarketConstraints = Field(default_factory=MarketConstraints)
 
 
 class TrailingPolicyData(StrictModel):
@@ -359,6 +393,7 @@ class ProfitExitSignalData(StrictModel):
     base_trailing_stop_pct: float = Field(gt=0, le=1)
     adjusted_trailing_stop_pct: float = Field(gt=0, le=1)
     adjustment_reasons: List[str] = Field(default_factory=list)
+    market_constraints: MarketConstraints = Field(default_factory=MarketConstraints)
 
 
 class HealthData(StrictModel):
