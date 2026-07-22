@@ -5,9 +5,11 @@ from enum import Enum
 import math
 import os
 import re
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+
+from app.config import PROFIT_AGENT_VERSION, PROFIT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
 
 
 T = TypeVar("T")
@@ -154,6 +156,7 @@ class ProfitLifecycle(StrictModel):
 
 
 class ProfitPlanRequest(StrictModel):
+    schema_version: Optional[str] = None
     position: ProfitPosition
     lifecycle: Optional[ProfitLifecycle] = None
     first_take_profit_r: float = Field(default=2.0, gt=0)
@@ -164,6 +167,14 @@ class ProfitPlanRequest(StrictModel):
     exit_on_stop_breach: bool = True
     warnings: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("schema_version")
+    @classmethod
+    def validate_schema_version(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in SUPPORTED_SCHEMA_VERSIONS:
+            supported = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
+            raise ValueError(f"unsupported schema_version; expected one of: {supported}")
+        return value
 
     @model_validator(mode="after")
     def validate_target_ordering(self) -> "ProfitPlanRequest":
@@ -215,10 +226,13 @@ class HealthData(StrictModel):
 
 
 class StandardAgentResponse(StrictModel, Generic[T]):
-    status: str
+    status: Literal["success", "error"]
     agent_type: str = "profit-agent"
-    version: str = "0.1.0"
+    version: str = PROFIT_AGENT_VERSION
+    schema_version: str = PROFIT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    correlation_id: str
     data: Optional[T] = None
     error: Optional[Dict[str, Any]] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    confidence_score: Optional[float] = Field(default=None, ge=0, le=1)

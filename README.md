@@ -59,6 +59,8 @@ curl http://localhost:8011/health
 ```bash
 curl -X POST http://localhost:8011/profit/plan \
   -H 'Content-Type: application/json' \
+  -H 'X-API-KEY: replace-with-service-secret' \
+  -H 'X-Correlation-ID: 00000000-0000-0000-0000-000000000000' \
   -d '{
     "position": {
       "symbol": "ADBE",
@@ -115,12 +117,32 @@ lifecycle itself; `Manager_Agent` must reserve the decision and only ask
 
 ```text
 GET  /health
+GET  /ready
+GET  /version
 POST /profit/plan
 POST /profit/monitor
 POST /profit/exit-signal
 ```
 
 All three profit endpoints use the same position model and return the same missing-peak warning behavior.
+
+All six endpoints use response contract `profit-decision.v2` and service
+version `0.2.0`. `/health`, `/ready`, and `/version` are operational endpoints
+and remain unauthenticated without exposing secrets. Every `/profit/*` endpoint
+requires the exact shared service key in `X-API-KEY`. Key comparison is
+constant-time, and the key is never included in responses.
+
+The service accepts `X-Correlation-ID` and returns the same value in the body
+and response header. If omitted or malformed, it creates a UUID. Manager must
+forward this ID to Profit, Risk, Database decision records, and Execution.
+
+```env
+APP_ENV=production
+PROFIT_AGENT_API_KEY=
+```
+
+Production startup fails when `PROFIT_AGENT_API_KEY` is empty. The checked-in
+`.env.example` intentionally contains no secret value.
 
 Requests reject unknown fields, non-finite numbers, malformed symbols, invalid
 long-position price relationships, and take-profit targets that are not
@@ -160,7 +182,9 @@ pytest -q
 
 ```bash
 docker build -t profit-agent .
-docker run --rm -p 8011:8011 profit-agent
+docker run --rm -p 8011:8011 \
+  -e PROFIT_AGENT_API_KEY="$PROFIT_AGENT_API_KEY" \
+  profit-agent
 ```
 
 ## Integration rule

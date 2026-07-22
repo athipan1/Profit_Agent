@@ -1,36 +1,42 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+
+from app.config import PROFIT_AGENT_VERSION, PROFIT_SCHEMA_VERSION
+
 
 PROFIT_AGENT_TYPE = "profit-agent"
-PROFIT_AGENT_VERSION = "0.1.0"
-SCHEMA_VERSION = "1.0"
 
 router = APIRouter()
 
 
 def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def request_correlation_id(request: Request) -> str:
+    return str(request.state.correlation_id)
 
 
 def contract_response(
     *,
     status: str,
-    data: Dict[str, Any] | None = None,
-    metadata: Dict[str, Any] | None = None,
-    error: Dict[str, Any] | None = None,
-    confidence_score: float | None = None,
+    correlation_id: str,
+    data: Any = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    error: Optional[Dict[str, Any]] = None,
+    confidence_score: Optional[float] = None,
 ) -> Dict[str, Any]:
     return {
         "status": status,
         "agent_type": PROFIT_AGENT_TYPE,
         "version": PROFIT_AGENT_VERSION,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": PROFIT_SCHEMA_VERSION,
         "timestamp": utc_timestamp(),
-        "correlation_id": None,
+        "correlation_id": correlation_id,
         "data": data,
         "metadata": metadata or {},
         "error": error,
@@ -39,13 +45,15 @@ def contract_response(
 
 
 @router.get("/version")
-def version() -> Dict[str, Any]:
+def version(request: Request) -> Dict[str, Any]:
+    correlation_id = request_correlation_id(request)
     return contract_response(
         status="success",
+        correlation_id=correlation_id,
         data={
             "agent_type": PROFIT_AGENT_TYPE,
             "version": PROFIT_AGENT_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": PROFIT_SCHEMA_VERSION,
             "api_contract": "multi-agent-trading-api-contract",
         },
         metadata={
@@ -55,9 +63,11 @@ def version() -> Dict[str, Any]:
 
 
 @router.get("/ready")
-def ready() -> Dict[str, Any]:
+def ready(request: Request) -> Dict[str, Any]:
+    correlation_id = request_correlation_id(request)
     return contract_response(
         status="success",
+        correlation_id=correlation_id,
         data={
             "ready": True,
             "plan_endpoint": "/profit/plan",
@@ -73,6 +83,7 @@ def ready() -> Dict[str, Any]:
         },
         metadata={
             "contract_source": "profit-agent-runtime-contract",
+            "authentication": "X-API-KEY required on profit endpoints",
         },
         confidence_score=1.0,
     )

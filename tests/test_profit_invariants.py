@@ -15,6 +15,7 @@ from app.service import (
 
 
 client = TestClient(app)
+AUTH_HEADERS = {"X-API-KEY": "test-profit-api-key"}
 
 
 def _request(*, current_price=108.0, peak=120.0, **overrides):
@@ -149,10 +150,15 @@ def test_unknown_fields_are_rejected(payload):
     else:
         body.update(payload)
 
-    response = client.post("/profit/plan", json=body)
+    response = client.post("/profit/plan", headers=AUTH_HEADERS, json=body)
 
     assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
+    payload = response.json()
+    assert payload["error"]["code"] == "validation_error"
+    assert any(
+        error["type"] == "extra_forbidden"
+        for error in payload["metadata"]["validation_errors"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -252,6 +258,7 @@ def test_request_warnings_survive_early_return(current_price, peak, expected_tri
 def test_all_profit_endpoints_detect_trailing_stop_breach(path):
     response = client.post(
         path,
+        headers=AUTH_HEADERS,
         json={
             "position": {
                 "symbol": "ACGL",
