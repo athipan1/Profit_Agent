@@ -4,28 +4,147 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, 'feature/**']
+    branches: [main, 'feature/**', 'chore/**']
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  PROFIT_AGENT_API_KEY: ci-profit-key
 
 jobs:
-  test:
-    name: Lint test and build
+  lint-type:
+    name: Ruff and mypy
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: ${{ github.workspace }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
-          python-version: '3.11'
-      - name: Install dependencies
+          python-version: '3.12'
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install --disable-pip-version-check --requirement requirements-dev.txt
+      - name: Ruff check
+        run: ruff check app tests scripts
+      - name: Ruff format check
+        run: ruff format --check app tests scripts
+      - name: Mypy
+        run: mypy app
+
+  test-coverage:
+    name: Pytest and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install --disable-pip-version-check --requirement requirements-dev.txt
+      - name: Run tests with branch coverage
+        run: coverage run -m pytest -q
+      - name: Enforce coverage threshold
+        run: coverage report --fail-under=90
+      - name: Write coverage XML
+        run: coverage xml
+
+  security:
+    name: Dependency and source security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install --disable-pip-version-check --requirement requirements-dev.txt
+      - name: Audit production dependencies
+        run: pip-audit --requirement requirements.txt
+      - name: Bandit source scan
+        run: bandit --recursive app --severity-level medium --confidence-level medium
+
+  contract:
+    name: OpenAPI and contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install --disable-pip-version-check --requirement requirements-dev.txt
+      - name: Validate OpenAPI schema
+        run: python scripts/validate_openapi.py
+      - name: Run API contract tests
+        run: >-
+          pytest -q
+          tests/test_api_contract.py
+          tests/test_authentication_and_correlation.py
+          tests/test_endpoint_semantics.py
+          tests/test_decimal_market_constraints.py
+
+  container:
+    name: Container health security and SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build production image
+        run: docker build --tag profit-agent:ci .
+      - name: Start production image
+        run: >-
+          docker run --detach --name profit-agent-ci --publish 8011:8011
+          --env APP_ENV=production
+          --env PROFIT_AGENT_API_KEY=ci-profit-key
+          profit-agent:ci
+      - name: Verify health non-root and headers
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Lint with Ruff
-        run: ruff check app tests
-      - name: Run unit tests
-        run: pytest -q
-      - name: Build Docker image
-        run: docker build -t profit-agent:test .
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8011/health >/tmp/health.json \
+              && test "$(docker inspect --format '{{.State.Health.Status}}' profit-agent-ci)" = "healthy"; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8011/health >/tmp/health.json
+          test "$(docker exec profit-agent-ci id -u)" != "0"
+          docker exec profit-agent-ci python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None; assert importlib.util.find_spec('ruff') is None"
+          if curl --silent --dump-header - --output /dev/null http://127.0.0.1:8011/health | grep --ignore-case '^server:'; then
+            echo "Server header must be disabled"
+            exit 1
+          fi
+          test "$(docker inspect --format '{{.State.Health.Status}}' profit-agent-ci)" = "healthy"
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: profit-agent:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0.17.8
+        with:
+          image: profit-agent:ci
+          format: spdx-json
+          output-file: profit-agent.spdx.json
+      - name: Verify SBOM exists
+        run: test -s profit-agent.spdx.json
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs profit-agent-ci
+      - name: Stop container
+        if: always()
+        run: docker rm --force profit-agent-ci

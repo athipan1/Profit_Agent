@@ -120,6 +120,7 @@ lifecycle itself; `Manager_Agent` must reserve the decision and only ask
 GET  /health
 GET  /ready
 GET  /version
+GET  /metrics
 POST /profit/plan
 POST /profit/monitor
 POST /profit/exit-signal
@@ -229,15 +230,21 @@ numbers for v2 compatibility.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8011
 ```
 
 ## Tests
 
 ```bash
-ruff check app tests
-pytest -q
+ruff check app tests scripts
+ruff format --check app tests scripts
+mypy app
+coverage run -m pytest -q
+coverage report --fail-under=90
+pip-audit -r requirements.txt
+bandit -r app -ll
+python scripts/validate_openapi.py
 ```
 
 ## Docker
@@ -245,9 +252,36 @@ pytest -q
 ```bash
 docker build -t profit-agent .
 docker run --rm -p 8011:8011 \
+  -e APP_ENV=production \
   -e PROFIT_AGENT_API_KEY="$PROFIT_AGENT_API_KEY" \
   profit-agent
 ```
+
+The production image pins Python 3.12.13 on slim-bookworm, installs only
+`requirements.txt`, runs as UID/GID 10001, disables Uvicorn access/server
+headers, and handles SIGTERM with a 30-second graceful shutdown window.
+
+Runtime configuration:
+
+```env
+PROFIT_AGENT_HOST=0.0.0.0
+PROFIT_AGENT_PORT=8011
+PROFIT_AGENT_WORKERS=1
+PROFIT_AGENT_LOG_LEVEL=INFO
+PROFIT_MAX_REQUEST_BODY_BYTES=65536
+PROFIT_REQUEST_TIMEOUT_SECONDS=30
+PROFIT_RATE_LIMIT_PER_MINUTE=120
+```
+
+`GET /metrics` exposes Prometheus counters/histograms for requests, validation,
+hard/trailing breaches, partial and duplicate decisions, peak fallback, and
+latency. Metrics use endpoint/status labels only; symbols, account IDs, and
+secrets are never metric labels. Application logs are one-line JSON and include
+correlation/decision/position identifiers and action reasons, but never API
+keys, authorization headers, broker credentials, database URLs, or raw request
+bodies. The in-memory rate limit is per worker, so deployments with multiple
+workers must size `PROFIT_RATE_LIMIT_PER_MINUTE` accordingly or add a shared
+gateway limiter.
 
 ## Integration rule
 

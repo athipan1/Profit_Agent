@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
 from app.config import market_data_max_age_seconds
 from app.models import ProfitAction, ProfitActionItem, ProfitPlanData, ProfitPlanRequest
@@ -159,6 +159,11 @@ def _unique_warnings(values: Iterable[str]) -> List[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
+def _profit_plan_data(**values: Any) -> ProfitPlanData:
+    """Validate dynamically composed policy and lifecycle fields."""
+    return ProfitPlanData.model_validate(values)
+
+
 def _base_warnings(request: ProfitPlanRequest) -> List[str]:
     warnings: List[str] = list(request.warnings)
     if request.position.highest_price_since_entry_inferred:
@@ -215,7 +220,7 @@ def _review_plan(
 ) -> ProfitPlanData:
     position = request.position
     review_warnings = _unique_warnings([*warnings, reason])
-    return ProfitPlanData(
+    return _profit_plan_data(
         symbol=position.symbol.upper(),
         current_r_multiple=_r_output(current_r),
         unrealized_pl_pct=_unrealized_pl_pct(request),
@@ -336,7 +341,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 },
             )
         )
-        return ProfitPlanData(
+        return _profit_plan_data(
             symbol=position.symbol.upper(),
             current_r_multiple=None,
             unrealized_pl_pct=_unrealized_pl_pct(request),
@@ -390,7 +395,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 },
             )
         )
-        return ProfitPlanData(
+        return _profit_plan_data(
             symbol=position.symbol.upper(),
             current_r_multiple=_r_output(current_r),
             unrealized_pl_pct=_unrealized_pl_pct(request),
@@ -459,7 +464,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 },
             )
         )
-        return ProfitPlanData(
+        return _profit_plan_data(
             symbol=position.symbol.upper(),
             current_r_multiple=_r_output(current_r),
             unrealized_pl_pct=_unrealized_pl_pct(request),
@@ -490,22 +495,24 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
     raw_trailing_stop = adjusted_trailing_stop
 
     break_even_stop = _break_even_stop(request, current_r)
-    recommended_stop = calculate_recommended_stop(
+    recommended_stop_decimal = calculate_recommended_stop(
         request,
         break_even_stop=break_even_stop,
         raw_trailing_stop=raw_trailing_stop,
     )
     if break_even_stop is not None or raw_trailing_stop is not None:
         if position.stop_loss is None or (
-            recommended_stop is not None
-            and recommended_stop > _decimal(position.stop_loss)
+            recommended_stop_decimal is not None
+            and recommended_stop_decimal > _decimal(position.stop_loss)
         ):
             actions.append(
                 ProfitActionItem(
                     action=ProfitAction.MOVE_STOP,
                     symbol=position.symbol.upper(),
                     quantity=0,
-                    recommended_stop=round_price_to_market(request, recommended_stop),
+                    recommended_stop=round_price_to_market(
+                        request, recommended_stop_decimal
+                    ),
                     reason="Move stop to lock profit or reduce downside risk",
                     confidence_score=0.72,
                     metadata={
@@ -541,13 +548,16 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             trigger="partial_exit_below_market_minimum",
             policy=policy,
         )
+    actionable_partial_quantity = cast(float, partial_quantity)
     if trigger == "second_take_profit":
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.PARTIAL_EXIT,
                 symbol=position.symbol.upper(),
-                quantity=partial_quantity,
-                recommended_stop=round_price_to_market(request, recommended_stop),
+                quantity=actionable_partial_quantity,
+                recommended_stop=round_price_to_market(
+                    request, recommended_stop_decimal
+                ),
                 reason=(
                     "Position reached second take-profit target at "
                     f"{request.second_take_profit_r}R"
@@ -560,8 +570,10 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             ProfitActionItem(
                 action=ProfitAction.PARTIAL_EXIT,
                 symbol=position.symbol.upper(),
-                quantity=partial_quantity,
-                recommended_stop=round_price_to_market(request, recommended_stop),
+                quantity=actionable_partial_quantity,
+                recommended_stop=round_price_to_market(
+                    request, recommended_stop_decimal
+                ),
                 reason=(
                     "Position reached first take-profit target at "
                     f"{request.first_take_profit_r}R"
@@ -576,7 +588,9 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 action=ProfitAction.HOLD,
                 symbol=position.symbol.upper(),
                 quantity=0,
-                recommended_stop=round_price_to_market(request, recommended_stop),
+                recommended_stop=round_price_to_market(
+                    request, recommended_stop_decimal
+                ),
                 reason="No take-profit or exit condition is triggered",
                 confidence_score=0.65,
             )
@@ -609,7 +623,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
     else:
         decision_fields = {}
-    return ProfitPlanData(
+    return _profit_plan_data(
         symbol=position.symbol.upper(),
         current_r_multiple=_r_output(current_r),
         unrealized_pl_pct=_unrealized_pl_pct(request),
@@ -617,7 +631,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         actions=actions,
         warnings=warnings,
         trigger=trigger,
-        recommended_stop=round_price_to_market(request, recommended_stop),
+        recommended_stop=round_price_to_market(request, recommended_stop_decimal),
         requires_risk_approval=requires_risk_approval,
         advisory_only=True,
         metadata={

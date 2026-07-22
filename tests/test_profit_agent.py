@@ -51,7 +51,10 @@ def test_first_take_profit_partial_exit():
     )
     assert result.current_r_multiple == 2.0
     assert result.primary_action == ProfitAction.PARTIAL_EXIT
-    assert any(action.action == ProfitAction.PARTIAL_EXIT and action.quantity == 6 for action in result.actions)
+    assert any(
+        action.action == ProfitAction.PARTIAL_EXIT and action.quantity == 6
+        for action in result.actions
+    )
 
 
 def test_break_even_or_trailing_stop_move_stop():
@@ -70,7 +73,9 @@ def test_break_even_or_trailing_stop_move_stop():
         )
     )
     assert any(action.action == ProfitAction.MOVE_STOP for action in result.actions)
-    move_stop = next(action for action in result.actions if action.action == ProfitAction.MOVE_STOP)
+    move_stop = next(
+        action for action in result.actions if action.action == ProfitAction.MOVE_STOP
+    )
     assert move_stop.recommended_stop == 110.4
     assert HIGHEST_PRICE_FALLBACK_WARNING not in result.warnings
 
@@ -115,7 +120,9 @@ def test_profit_plan_endpoint():
     assert HIGHEST_PRICE_FALLBACK_WARNING not in payload["data"]["warnings"]
 
 
-@pytest.mark.parametrize("path", ["/profit/plan", "/profit/monitor", "/profit/exit-signal"])
+@pytest.mark.parametrize(
+    "path", ["/profit/plan", "/profit/monitor", "/profit/exit-signal"]
+)
 @pytest.mark.parametrize(
     "peak_payload",
     [

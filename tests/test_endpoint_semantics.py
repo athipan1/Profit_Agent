@@ -127,9 +127,9 @@ def test_exit_signal_returns_no_exit_for_hold():
 def test_openapi_exposes_distinct_response_contracts():
     paths = client.get("/openapi.json").json()["paths"]
     schemas = {
-        path: paths[path]["post"]["responses"]["200"]["content"][
-            "application/json"
-        ]["schema"]["$ref"]
+        path: paths[path]["post"]["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]["$ref"]
         for path in ("/profit/plan", "/profit/monitor", "/profit/exit-signal")
     }
 

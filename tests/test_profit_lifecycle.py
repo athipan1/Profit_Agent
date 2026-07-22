@@ -35,16 +35,16 @@ def _payload(*, current_price=112, lifecycle=None):
 
 
 def test_first_target_decision_id_is_deterministic():
-    request = ProfitPlanRequest.model_validate(_payload(current_price=108, lifecycle={}))
+    request = ProfitPlanRequest.model_validate(
+        _payload(current_price=108, lifecycle={})
+    )
 
     first = build_profit_plan(request)
     second = build_profit_plan(request)
 
     assert first.primary_action == ProfitAction.PARTIAL_EXIT
     assert first.decision_type == "first_take_profit"
-    assert first.decision_id == (
-        "profit:account-1:position-42:ACGL:v7:tp1"
-    )
+    assert first.decision_id == ("profit:account-1:position-42:ACGL:v7:tp1")
     assert second.decision_id == first.decision_id
     assert first.position_version == 7
     assert first.next_lifecycle_state == {"first_target_executed": True}

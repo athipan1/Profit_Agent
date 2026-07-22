@@ -29,7 +29,9 @@ def payload(**overrides):
     return value
 
 
-@pytest.mark.parametrize("path", ["/profit/plan", "/profit/monitor", "/profit/exit-signal"])
+@pytest.mark.parametrize(
+    "path", ["/profit/plan", "/profit/monitor", "/profit/exit-signal"]
+)
 def test_profit_endpoints_require_api_key(path):
     response = client.post(path, json=payload())
 
@@ -66,9 +68,7 @@ def test_openapi_declares_profit_api_key_security():
 
     scheme = schema["components"]["securitySchemes"]["APIKeyHeader"]
     assert scheme == {"type": "apiKey", "in": "header", "name": "X-API-KEY"}
-    assert schema["paths"]["/profit/plan"]["post"]["security"] == [
-        {"APIKeyHeader": []}
-    ]
+    assert schema["paths"]["/profit/plan"]["post"]["security"] == [{"APIKeyHeader": []}]
     assert "security" not in schema["paths"]["/health"]["get"]
 
 

@@ -1,0 +1,9 @@
+-r requirements.txt
+bandit==1.8.0
+coverage==7.6.10
+httpx==0.28.1
+mypy==1.14.1
+openapi-spec-validator==0.7.1
+pip-audit==2.7.3
+pytest==8.3.4
+ruff==0.8.4
