@@ -162,7 +162,7 @@ def test_internal_error_does_not_return_exception_text(monkeypatch):
     def fail(_request):
         raise RuntimeError("database-url-or-secret-must-not-leak")
 
-    monkeypatch.setattr("app.main.build_profit_plan", fail)
+    monkeypatch.setattr("app.main.build_initial_profit_plan", fail)
     response = client.post(
         "/profit/plan",
         headers={**AUTH_HEADERS, "X-Correlation-ID": "internal-corr-1"},

@@ -124,7 +124,21 @@ POST /profit/monitor
 POST /profit/exit-signal
 ```
 
-All three profit endpoints use the same position model and return the same missing-peak warning behavior.
+All three profit endpoints accept the same validated position/lifecycle input,
+share one safety decision engine, and return the same missing-peak warning
+behavior. Their response data is intentionally different:
+
+- `/profit/plan` returns the initial stop, first/second target prices, trailing
+  policy, and partial-exit policy.
+- `/profit/monitor` returns current R, profit stage, recommended stop, target
+  reached/executed state, and warnings.
+- `/profit/exit-signal` returns a compact Risk-gate projection with
+  `should_exit`, `exit_type`, urgency, and recommended quantity.
+
+During the v2 migration, `/profit/plan` retains the legacy decision fields at
+the top level so the current Manager can migrate without a silent contract
+break. New monitoring callers should use `/profit/monitor`; Risk-gate callers
+should use `/profit/exit-signal`.
 
 All six endpoints use response contract `profit-decision.v2` and service
 version `0.2.0`. `/health`, `/ready`, and `/version` are operational endpoints
