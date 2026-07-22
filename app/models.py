@@ -2,12 +2,38 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+import math
+import os
+import re
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 
 T = TypeVar("T")
+
+RISK_MISMATCH_POLICIES = {"reject", "warn", "recalculate"}
+RISK_MISMATCH_REL_TOL = 1e-6
+RISK_MISMATCH_ABS_TOL = 1e-6
+SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9.-]{0,14}$")
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        allow_inf_nan=False,
+        str_strip_whitespace=True,
+    )
+
+
+def _risk_mismatch_policy() -> str:
+    policy = os.getenv("PROFIT_RISK_MISMATCH_POLICY", "reject").strip().lower()
+    if policy not in RISK_MISMATCH_POLICIES:
+        supported = ", ".join(sorted(RISK_MISMATCH_POLICIES))
+        raise ValueError(
+            f"PROFIT_RISK_MISMATCH_POLICY must be one of: {supported}"
+        )
+    return policy
 
 
 class ProfitAction(str, Enum):
@@ -22,7 +48,7 @@ class PositionSide(str, Enum):
     LONG = "long"
 
 
-class ProfitPosition(BaseModel):
+class ProfitPosition(StrictModel):
     symbol: str
     side: PositionSide = PositionSide.LONG
     quantity: float = Field(gt=0)
@@ -35,14 +61,55 @@ class ProfitPosition(BaseModel):
     strategy_bucket: Optional[str] = None
 
     _highest_price_since_entry_inferred: bool = PrivateAttr(default=False)
+    _risk_per_share_warning: Optional[str] = PrivateAttr(default=None)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def validate_symbol(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            raise ValueError("symbol must be a string")
+        if value != value.strip():
+            raise ValueError("symbol must not contain leading or trailing whitespace")
+        if not value or not SYMBOL_PATTERN.fullmatch(value):
+            raise ValueError(
+                "symbol must start with a letter and contain only letters, digits, '.' or '-'"
+            )
+        return value
 
     @model_validator(mode="after")
-    def infer_risk_per_share(self) -> "ProfitPosition":
-        if self.risk_per_share is None and self.stop_loss is not None and self.entry_price > self.stop_loss:
-            self.risk_per_share = self.entry_price - self.stop_loss
+    def validate_long_position(self) -> "ProfitPosition":
+        if self.stop_loss is not None and self.stop_loss >= self.entry_price:
+            raise ValueError("stop_loss must be below entry_price for a long position")
+
         if self.highest_price_since_entry is None:
             self.highest_price_since_entry = max(self.entry_price, self.current_price)
             self._highest_price_since_entry_inferred = True
+        elif self.highest_price_since_entry < self.entry_price:
+            raise ValueError("highest_price_since_entry must be at least entry_price")
+        elif self.highest_price_since_entry < self.current_price:
+            raise ValueError("highest_price_since_entry must be at least current_price")
+
+        if self.stop_loss is not None:
+            expected_risk = self.entry_price - self.stop_loss
+            if self.risk_per_share is None:
+                self.risk_per_share = expected_risk
+            elif not math.isclose(
+                self.risk_per_share,
+                expected_risk,
+                rel_tol=RISK_MISMATCH_REL_TOL,
+                abs_tol=RISK_MISMATCH_ABS_TOL,
+            ):
+                policy = _risk_mismatch_policy()
+                message = (
+                    "risk_per_share does not match entry_price - stop_loss; "
+                    f"received {self.risk_per_share:g}, expected {expected_risk:g}"
+                )
+                if policy == "reject":
+                    raise ValueError(message)
+                self._risk_per_share_warning = f"{message}; policy={policy}"
+                if policy == "recalculate":
+                    self.risk_per_share = expected_risk
+
         if self.unrealized_pl_pct is None:
             self.unrealized_pl_pct = (self.current_price - self.entry_price) / self.entry_price
         return self
@@ -52,8 +119,12 @@ class ProfitPosition(BaseModel):
         """Whether the service had to infer the peak because the caller omitted it."""
         return self._highest_price_since_entry_inferred
 
+    @property
+    def risk_per_share_warning(self) -> Optional[str]:
+        return self._risk_per_share_warning
 
-class ProfitPlanRequest(BaseModel):
+
+class ProfitPlanRequest(StrictModel):
     position: ProfitPosition
     first_take_profit_r: float = Field(default=2.0, gt=0)
     second_take_profit_r: float = Field(default=3.0, gt=0)
@@ -61,9 +132,17 @@ class ProfitPlanRequest(BaseModel):
     trailing_stop_pct: float = Field(default=0.08, gt=0, le=1)
     break_even_trigger_r: float = Field(default=1.0, gt=0)
     exit_on_stop_breach: bool = True
+    warnings: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_target_ordering(self) -> "ProfitPlanRequest":
+        if self.second_take_profit_r <= self.first_take_profit_r:
+            raise ValueError("second_take_profit_r must be greater than first_take_profit_r")
+        return self
 
 
-class ProfitActionItem(BaseModel):
+class ProfitActionItem(StrictModel):
     action: ProfitAction
     symbol: str
     quantity: float = Field(ge=0)
@@ -73,7 +152,7 @@ class ProfitActionItem(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ProfitPlanData(BaseModel):
+class ProfitPlanData(StrictModel):
     symbol: str
     current_r_multiple: Optional[float]
     unrealized_pl_pct: float
@@ -81,14 +160,18 @@ class ProfitPlanData(BaseModel):
     actions: List[ProfitActionItem]
     warnings: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    trigger: Optional[str] = None
+    recommended_stop: Optional[float] = None
+    requires_risk_approval: bool = False
+    advisory_only: bool = True
 
 
-class HealthData(BaseModel):
+class HealthData(StrictModel):
     status: str = "healthy"
     service: str = "profit-agent"
 
 
-class StandardAgentResponse(BaseModel, Generic[T]):
+class StandardAgentResponse(StrictModel, Generic[T]):
     status: str
     agent_type: str = "profit-agent"
     version: str = "0.1.0"

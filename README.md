@@ -13,6 +13,12 @@ It does **not** place sell orders. It returns suggested actions for `Manager_Age
 - Recommend partial take profit
 - Return advisory exit signal metadata
 
+Hard stop-loss and active trailing-stop breaches always take priority over
+break-even and take-profit advice. A trailing threshold is not discarded when
+the latest price crosses it; the service returns an advisory `exit_all` with
+`trigger=trailing_stop_breach`, `requires_risk_approval=true`, and never sends
+an order itself.
+
 ## Position peak responsibility
 
 `Profit_Agent` is stateless. It does not store positions, market-price history, or the highest price observed after entry.
@@ -94,6 +100,24 @@ POST /profit/exit-signal
 ```
 
 All three profit endpoints use the same position model and return the same missing-peak warning behavior.
+
+Requests reject unknown fields, non-finite numbers, malformed symbols, invalid
+long-position price relationships, and take-profit targets that are not
+strictly ordered. If `entry_price`, `stop_loss`, and `risk_per_share` are all
+provided, the risk value must match `entry_price - stop_loss` within floating
+point tolerance.
+
+## Runtime policy
+
+```env
+PROFIT_RISK_MISMATCH_POLICY=reject
+```
+
+Supported values are `reject`, `warn`, and `recalculate`. The production-safe
+default is `reject`. Both non-reject policies add a response warning;
+`recalculate` also replaces the supplied value with the derived risk. Manager
+must preserve warnings and still send every actionable advisory through
+`Risk_Agent` before `Execution_Agent`.
 
 ## Local development
 

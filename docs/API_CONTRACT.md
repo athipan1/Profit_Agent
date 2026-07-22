@@ -49,6 +49,44 @@ POST /profit/exit-signal
 
 All profit endpoints accept the same `ProfitPlanRequest` and return `ProfitPlanData` inside the service response envelope.
 
+### Safety precedence
+
+The shared domain decision order is:
+
+1. Validate request invariants.
+2. Detect hard stop-loss breach.
+3. Calculate R-multiple.
+4. Calculate the raw trailing-stop threshold.
+5. Detect trailing-stop breach, including equality.
+6. Evaluate break-even stop.
+7. Evaluate partial exits.
+8. Hold when no condition applies.
+
+The legacy `exit_on_stop_breach` input remains accepted for compatibility but
+cannot suppress detection of a breached hard stop. Safety detection is
+fail-closed; downstream execution still requires `Risk_Agent` approval.
+
+A breached trailing stop returns `primary_action=exit_all`,
+`trigger=trailing_stop_breach`, the breached threshold in `recommended_stop`,
+and `requires_risk_approval=true`. This is advisory output only.
+
+### Input invariants
+
+The request contract forbids unknown fields and rejects `NaN`, infinity,
+non-positive quantities/risks, percentages outside `(0, 1]`, malformed or
+whitespace-padded symbols, and invalid target ordering. For a long position:
+
+```text
+highest_price_since_entry >= entry_price
+highest_price_since_entry >= current_price
+stop_loss < entry_price
+second_take_profit_r > first_take_profit_r
+```
+
+When all risk inputs are supplied, `risk_per_share` must be approximately
+`entry_price - stop_loss`. `PROFIT_RISK_MISMATCH_POLICY` supports `reject`,
+`warn`, and `recalculate`; it defaults to `reject`.
+
 ## Position Peak Contract
 
 The caller is responsible for sending the highest observed market price for the current position lifecycle:
