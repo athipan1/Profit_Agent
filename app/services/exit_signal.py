@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from app.models import (
     ProfitAction,
     ProfitExitSignalData,
@@ -24,7 +26,7 @@ def build_exit_signal(request: ProfitPlanRequest) -> ProfitExitSignalData:
         ),
         None,
     )
-    urgency = (
+    urgency: Literal["immediate", "normal", "none"] = (
         "immediate"
         if should_exit and assessment.trigger in IMMEDIATE_TRIGGERS
         else "normal"

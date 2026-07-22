@@ -2,7 +2,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .venv/
 .env
 .coverage
 htmlcov/
+coverage.xml
+*.spdx.json
