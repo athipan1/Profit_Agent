@@ -7,6 +7,7 @@ from app.service import HIGHEST_PRICE_FALLBACK_WARNING, build_profit_plan
 
 
 client = TestClient(app)
+AUTH_HEADERS = {"X-API-KEY": "test-profit-api-key"}
 
 
 def test_health_endpoint():
@@ -92,6 +93,7 @@ def test_hold_when_no_profit_rule_triggered():
 def test_profit_plan_endpoint():
     response = client.post(
         "/profit/plan",
+        headers=AUTH_HEADERS,
         json={
             "position": {
                 "symbol": "ADBE",
@@ -124,6 +126,7 @@ def test_profit_plan_endpoint():
 def test_profit_endpoints_warn_when_highest_price_is_unavailable(path, peak_payload):
     response = client.post(
         path,
+        headers=AUTH_HEADERS,
         json={
             "position": {
                 "symbol": "ADBE",

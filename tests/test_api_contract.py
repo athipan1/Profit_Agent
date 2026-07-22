@@ -20,8 +20,9 @@ REQUIRED_CONTRACT_FIELDS = {
 def assert_contract_response(payload):
     assert REQUIRED_CONTRACT_FIELDS.issubset(payload.keys())
     assert payload["agent_type"] == "profit-agent"
-    assert payload["version"] == "0.1.0"
-    assert payload["schema_version"] == "1.0"
+    assert payload["version"] == "0.2.0"
+    assert payload["schema_version"] == "profit-decision.v2"
+    assert payload["correlation_id"]
 
 
 def test_version_endpoint_uses_contract_response():
@@ -32,7 +33,7 @@ def test_version_endpoint_uses_contract_response():
     payload = response.json()
     assert_contract_response(payload)
     assert payload["data"]["api_contract"] == "multi-agent-trading-api-contract"
-    assert payload["data"]["schema_version"] == "1.0"
+    assert payload["data"]["schema_version"] == "profit-decision.v2"
 
 
 def test_ready_endpoint_uses_contract_response():
@@ -54,5 +55,7 @@ def test_existing_health_endpoint_still_works():
     payload = response.json()
     assert payload["status"] == "success"
     assert payload["agent_type"] == "profit-agent"
-    assert payload["version"] == "0.1.0"
+    assert payload["version"] == "0.2.0"
+    assert payload["schema_version"] == "profit-decision.v2"
+    assert payload["correlation_id"]
     assert payload["data"]["status"] == "healthy"

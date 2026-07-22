@@ -20,10 +20,10 @@ Operational contract endpoints return this envelope:
 {
   "status": "success",
   "agent_type": "profit-agent",
-  "version": "0.1.0",
-  "schema_version": "1.0",
-  "timestamp": "2026-07-04T00:00:00Z",
-  "correlation_id": null,
+  "version": "0.2.0",
+  "schema_version": "profit-decision.v2",
+  "timestamp": "2026-07-22T00:00:00Z",
+  "correlation_id": "00000000-0000-0000-0000-000000000000",
   "data": {},
   "metadata": {},
   "error": null,
@@ -48,6 +48,17 @@ POST /profit/exit-signal
 ```
 
 All profit endpoints accept the same `ProfitPlanRequest` and return `ProfitPlanData` inside the service response envelope.
+
+`/health`, `/ready`, and `/version` are open operational endpoints. All
+`/profit/*` endpoints require `X-API-KEY`. The service key comes only from
+`PROFIT_AGENT_API_KEY`; production startup fails if it is missing. Authentication
+failures use the same envelope with HTTP 401 and
+`error.code=authentication_failed`.
+
+If `X-Correlation-ID` is present and valid, the response body and header echo
+it. Otherwise the service generates a UUID. Validation, authentication,
+malformed lifecycle, invalid schema, and internal errors preserve the request
+correlation ID without returning request values, secrets, or stack traces.
 
 ### Safety precedence
 
@@ -128,6 +139,17 @@ marked executed while TP1 is false. Lifecycle omission remains temporarily
 accepted for the legacy `profit-plan.v1` migration path; such responses do not
 contain an idempotency identity and must not be auto-executed.
 
+### Compatibility timeline
+
+- From 2026-07-22, `profit-decision.v2` is the current response contract.
+- Requests may omit `schema_version` or explicitly use `profit-plan.v1` during
+  migration. Manager accepts these responses only for advisory display, logs a
+  deprecation warning, and blocks automatic execution without deterministic
+  lifecycle identity.
+- Target date 2026-10-31: callers must send/consume `profit-decision.v2`.
+  Removal of the legacy path requires a separately announced breaking release;
+  it will not occur silently.
+
 ## Position Peak Contract
 
 The caller is responsible for sending the highest observed market price for the current position lifecycle:
@@ -174,5 +196,5 @@ This is a final defensive layer. It does not replace the upstream responsibility
 1. This service provides profit-taking context for other agents.
 2. Runtime readiness is reported through `/ready`.
 3. Version and schema metadata are reported through `/version`.
-4. Existing profit endpoints keep their current response models.
+4. Profit endpoints use the authenticated `profit-decision.v2` envelope.
 5. Missing position-peak history causes a successful response with a warning, not an error.
