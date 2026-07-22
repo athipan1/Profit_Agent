@@ -9,13 +9,23 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import validate_runtime_configuration
-from app.models import HealthData, ProfitPlanData, ProfitPlanRequest
+from app.models import (
+    HealthData,
+    ProfitExitSignalData,
+    ProfitInitialPlanData,
+    ProfitMonitorData,
+    ProfitPlanRequest,
+    StandardAgentResponse,
+    StrictModel,
+)
 from app.security import (
     ProfitAuthenticationError,
     ProfitConfigurationError,
     require_profit_api_key,
 )
-from app.service import build_profit_plan
+from app.services.exit_signal import build_exit_signal
+from app.services.profit_monitor import build_profit_monitor
+from app.services.profit_planner import build_initial_profit_plan
 from app.system_contract import contract_response, router as system_contract_router
 
 
@@ -151,46 +161,80 @@ def health(request: Request) -> Dict[str, Any]:
     )
 
 
-def _profit_response(request: Request, payload: ProfitPlanRequest) -> Dict[str, Any]:
-    data: ProfitPlanData = build_profit_plan(payload)
-    confidence = max((item.confidence_score for item in data.actions), default=None)
+def _profit_response(
+    request: Request,
+    payload: ProfitPlanRequest,
+    data: StrictModel,
+    *,
+    endpoint_semantics: str,
+) -> Dict[str, Any]:
+    actions = getattr(data, "actions", [])
+    confidence = max(
+        (item.confidence_score for item in actions),
+        default=(0.90 if getattr(data, "should_exit", False) else 0.65),
+    )
     return contract_response(
         status="success",
         correlation_id=_correlation_id(request),
         data=data.model_dump(mode="json"),
         metadata={
             "advisory_only": True,
+            "endpoint_semantics": endpoint_semantics,
             "request_schema_version": payload.schema_version or "profit-plan.v1",
         },
         confidence_score=confidence,
     )
 
 
-@app.post("/profit/plan")
+@app.post(
+    "/profit/plan",
+    response_model=StandardAgentResponse[ProfitInitialPlanData],
+)
 def profit_plan(
     request: Request,
     payload: ProfitPlanRequest,
     _: None = Depends(require_profit_api_key),
 ) -> Dict[str, Any]:
-    return _profit_response(request, payload)
+    return _profit_response(
+        request,
+        payload,
+        build_initial_profit_plan(payload),
+        endpoint_semantics="initial_profit_plan",
+    )
 
 
-@app.post("/profit/monitor")
+@app.post(
+    "/profit/monitor",
+    response_model=StandardAgentResponse[ProfitMonitorData],
+)
 def profit_monitor(
     request: Request,
     payload: ProfitPlanRequest,
     _: None = Depends(require_profit_api_key),
 ) -> Dict[str, Any]:
-    return _profit_response(request, payload)
+    return _profit_response(
+        request,
+        payload,
+        build_profit_monitor(payload),
+        endpoint_semantics="position_monitor",
+    )
 
 
-@app.post("/profit/exit-signal")
+@app.post(
+    "/profit/exit-signal",
+    response_model=StandardAgentResponse[ProfitExitSignalData],
+)
 def profit_exit_signal(
     request: Request,
     payload: ProfitPlanRequest,
     _: None = Depends(require_profit_api_key),
 ) -> Dict[str, Any]:
-    return _profit_response(request, payload)
+    return _profit_response(
+        request,
+        payload,
+        build_exit_signal(payload),
+        endpoint_semantics="risk_gate_exit_signal",
+    )
 
 
 @app.get("/", include_in_schema=False)

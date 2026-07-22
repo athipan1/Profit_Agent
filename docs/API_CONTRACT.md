@@ -47,7 +47,65 @@ POST /profit/monitor
 POST /profit/exit-signal
 ```
 
-All profit endpoints accept the same `ProfitPlanRequest` and return `ProfitPlanData` inside the service response envelope.
+All profit endpoints accept the same `ProfitPlanRequest`, use the same domain
+safety assessment, and return endpoint-specific typed data inside the service
+response envelope.
+
+### `POST /profit/plan`
+
+Creates the initial deterministic policy for a newly opened position. Its data
+includes:
+
+```json
+{
+  "initial_stop": 96.0,
+  "first_target_price": 108.0,
+  "second_target_price": 112.0,
+  "trailing_policy": {
+    "activation_r": 1.0,
+    "trailing_stop_pct": 0.08,
+    "reference": "highest_price_since_entry",
+    "breach_at_or_below": true
+  },
+  "partial_exit_policy": {
+    "first_target_r": 2.0,
+    "second_target_r": 3.0,
+    "partial_exit_pct": 0.3
+  }
+}
+```
+
+For backward compatibility during the v2 migration, this response also keeps
+the existing decision fields (`primary_action`, `actions`, `decision_id`, and
+lifecycle proposal) at the top level. Manager should migrate active-position
+evaluation to `/profit/monitor` before these aliases are removed in an
+announced future contract.
+
+### `POST /profit/monitor`
+
+Evaluates the latest position state. It returns `current_r`, `profit_stage`,
+`recommended_stop`, warnings, the shared advisory decision fields, and target
+status that distinguishes threshold reach from Database-confirmed execution.
+
+### `POST /profit/exit-signal`
+
+Returns a compact projection for Risk_Agent:
+
+```json
+{
+  "should_exit": true,
+  "exit_type": "trailing_stop_breach",
+  "urgency": "immediate",
+  "recommended_quantity": 10,
+  "recommended_stop": 110.4,
+  "requires_risk_approval": true,
+  "advisory_only": true
+}
+```
+
+Hard-stop and trailing-stop breaches are `immediate`; partial targets use
+`normal`; non-exit assessments use `none`. The compact response preserves
+deterministic decision identity when lifecycle input is available.
 
 `/health`, `/ready`, and `/version` are open operational endpoints. All
 `/profit/*` endpoints require `X-API-KEY`. The service key comes only from

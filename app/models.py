@@ -220,6 +220,73 @@ class ProfitPlanData(StrictModel):
     next_lifecycle_state: Dict[str, bool] = Field(default_factory=dict)
 
 
+class TrailingPolicyData(StrictModel):
+    activation_r: float = Field(gt=0)
+    trailing_stop_pct: float = Field(gt=0, le=1)
+    reference: Literal["highest_price_since_entry"] = "highest_price_since_entry"
+    breach_at_or_below: bool = True
+
+
+class PartialExitPolicyData(StrictModel):
+    first_target_r: float = Field(gt=0)
+    second_target_r: float = Field(gt=0)
+    partial_exit_pct: float = Field(gt=0, le=1)
+
+
+class ProfitInitialPlanData(ProfitPlanData):
+    """Initial position plan plus temporary v2 decision compatibility fields."""
+
+    initial_stop: Optional[float] = None
+    first_target_price: Optional[float] = None
+    second_target_price: Optional[float] = None
+    trailing_policy: TrailingPolicyData
+    partial_exit_policy: PartialExitPolicyData
+
+
+class ProfitStage(str, Enum):
+    HARD_STOP_BREACH = "hard_stop_breach"
+    TRAILING_STOP_BREACH = "trailing_stop_breach"
+    TARGETS_COMPLETE = "targets_complete"
+    SECOND_TARGET_REACHED = "second_target_reached"
+    FIRST_TARGET_REACHED = "first_target_reached"
+    BREAK_EVEN_ACTIVE = "break_even_active"
+    BELOW_BREAK_EVEN = "below_break_even"
+    R_UNAVAILABLE = "r_unavailable"
+
+
+class ProfitTargetStatusData(StrictModel):
+    lifecycle_available: bool
+    first_target_reached: bool
+    first_target_executed: bool
+    second_target_reached: bool
+    second_target_executed: bool
+    remaining_quantity: float = Field(gt=0)
+
+
+class ProfitMonitorData(ProfitPlanData):
+    current_r: Optional[float] = None
+    profit_stage: ProfitStage
+    target_status: ProfitTargetStatusData
+
+
+class ProfitExitSignalData(StrictModel):
+    symbol: str
+    should_exit: bool
+    exit_type: Optional[str] = None
+    urgency: Literal["immediate", "normal", "none"]
+    recommended_quantity: float = Field(ge=0)
+    recommended_stop: Optional[float] = None
+    requires_risk_approval: bool
+    advisory_only: bool = True
+    warnings: List[str] = Field(default_factory=list)
+    primary_action: ProfitAction
+    trigger: Optional[str] = None
+    decision_id: Optional[str] = None
+    decision_type: Optional[str] = None
+    position_version: Optional[int] = None
+    next_lifecycle_state: Dict[str, bool] = Field(default_factory=dict)
+
+
 class HealthData(StrictModel):
     status: str = "healthy"
     service: str = "profit-agent"
