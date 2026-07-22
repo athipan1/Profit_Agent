@@ -7,9 +7,20 @@ import os
 import re
 from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
-from app.config import PROFIT_AGENT_VERSION, PROFIT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
+from app.config import (
+    PROFIT_AGENT_VERSION,
+    PROFIT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+)
 
 
 T = TypeVar("T")
@@ -33,9 +44,7 @@ def _risk_mismatch_policy() -> str:
     policy = os.getenv("PROFIT_RISK_MISMATCH_POLICY", "reject").strip().lower()
     if policy not in RISK_MISMATCH_POLICIES:
         supported = ", ".join(sorted(RISK_MISMATCH_POLICIES))
-        raise ValueError(
-            f"PROFIT_RISK_MISMATCH_POLICY must be one of: {supported}"
-        )
+        raise ValueError(f"PROFIT_RISK_MISMATCH_POLICY must be one of: {supported}")
     return policy
 
 
@@ -49,6 +58,50 @@ class ProfitAction(str, Enum):
 
 class PositionSide(str, Enum):
     LONG = "long"
+
+
+class MarketRegime(str, Enum):
+    BULL = "BULL"
+    BEAR = "BEAR"
+    SIDEWAYS = "SIDEWAYS"
+    VOLATILE = "VOLATILE"
+
+
+class MarketRiskLevel(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class ProfitMarketContext(StrictModel):
+    regime: MarketRegime
+    risk_level: MarketRiskLevel
+    atr_pct: Optional[float] = Field(default=None, gt=0, le=1)
+    volatility_percentile: Optional[float] = Field(default=None, ge=0, le=100)
+    trend_strength: Optional[float] = Field(default=None, ge=0, le=1)
+    volume_strength: Optional[float] = Field(default=None, ge=0, le=1)
+    holding_days: int = Field(default=0, ge=0)
+    upcoming_event_risk: bool = False
+    observed_at: Optional[datetime] = None
+
+    @field_validator("regime", "risk_level", mode="before")
+    @classmethod
+    def normalize_enum(cls, value: Any) -> Any:
+        return value.upper() if isinstance(value, str) else value
+
+    @field_validator("observed_at")
+    @classmethod
+    def require_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("observed_at must include a timezone")
+        return value
+
+
+class ProfitDataQuality(StrictModel):
+    market_price_fresh: bool
+    peak_history_complete: bool
+    position_version_current: bool
+    emergency_halt_active: bool = False
 
 
 class ProfitPosition(StrictModel):
@@ -114,7 +167,9 @@ class ProfitPosition(StrictModel):
                     self.risk_per_share = expected_risk
 
         if self.unrealized_pl_pct is None:
-            self.unrealized_pl_pct = (self.current_price - self.entry_price) / self.entry_price
+            self.unrealized_pl_pct = (
+                self.current_price - self.entry_price
+            ) / self.entry_price
         return self
 
     @property
@@ -149,9 +204,7 @@ class ProfitLifecycle(StrictModel):
     @model_validator(mode="after")
     def validate_target_sequence(self) -> "ProfitLifecycle":
         if self.second_target_executed and not self.first_target_executed:
-            raise ValueError(
-                "second_target_executed requires first_target_executed"
-            )
+            raise ValueError("second_target_executed requires first_target_executed")
         return self
 
 
@@ -167,19 +220,25 @@ class ProfitPlanRequest(StrictModel):
     exit_on_stop_breach: bool = True
     warnings: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    market_context: Optional[ProfitMarketContext] = None
+    data_quality: Optional[ProfitDataQuality] = None
 
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and value not in SUPPORTED_SCHEMA_VERSIONS:
             supported = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
-            raise ValueError(f"unsupported schema_version; expected one of: {supported}")
+            raise ValueError(
+                f"unsupported schema_version; expected one of: {supported}"
+            )
         return value
 
     @model_validator(mode="after")
     def validate_target_ordering(self) -> "ProfitPlanRequest":
         if self.second_take_profit_r <= self.first_take_profit_r:
-            raise ValueError("second_take_profit_r must be greater than first_take_profit_r")
+            raise ValueError(
+                "second_take_profit_r must be greater than first_take_profit_r"
+            )
         if self.lifecycle is not None and not math.isclose(
             self.lifecycle.remaining_quantity,
             self.position.quantity,
@@ -218,6 +277,15 @@ class ProfitPlanData(StrictModel):
     decision_type: Optional[str] = None
     position_version: Optional[int] = None
     next_lifecycle_state: Dict[str, bool] = Field(default_factory=dict)
+    decision_status: Literal["advisory", "review", "blocked"] = "advisory"
+    data_quality: Dict[str, bool] = Field(default_factory=dict)
+    policy_source: str = "static_v1"
+    base_trailing_stop_pct: float = Field(gt=0, le=1)
+    adjusted_trailing_stop_pct: float = Field(gt=0, le=1)
+    adjusted_first_take_profit_r: float = Field(gt=0)
+    adjusted_second_take_profit_r: float = Field(gt=0)
+    adjusted_partial_exit_pct: float = Field(gt=0, le=1)
+    adjustment_reasons: List[str] = Field(default_factory=list)
 
 
 class TrailingPolicyData(StrictModel):
@@ -285,6 +353,12 @@ class ProfitExitSignalData(StrictModel):
     decision_type: Optional[str] = None
     position_version: Optional[int] = None
     next_lifecycle_state: Dict[str, bool] = Field(default_factory=dict)
+    decision_status: Literal["advisory", "review", "blocked"] = "advisory"
+    data_quality: Dict[str, bool] = Field(default_factory=dict)
+    policy_source: str = "static_v1"
+    base_trailing_stop_pct: float = Field(gt=0, le=1)
+    adjusted_trailing_stop_pct: float = Field(gt=0, le=1)
+    adjustment_reasons: List[str] = Field(default_factory=list)
 
 
 class HealthData(StrictModel):

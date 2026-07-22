@@ -26,9 +26,9 @@ def _profit_stage(
     current_r = assessment.current_r_multiple
     if current_r is None:
         return ProfitStage.R_UNAVAILABLE
-    if current_r >= request.second_take_profit_r:
+    if current_r >= assessment.adjusted_second_take_profit_r:
         return ProfitStage.SECOND_TARGET_REACHED
-    if current_r >= request.first_take_profit_r:
+    if current_r >= assessment.adjusted_first_take_profit_r:
         return ProfitStage.FIRST_TARGET_REACHED
     if current_r >= request.break_even_trigger_r:
         return ProfitStage.BREAK_EVEN_ACTIVE
@@ -51,13 +51,13 @@ def build_profit_monitor(request: ProfitPlanRequest) -> ProfitMonitorData:
         target_status=ProfitTargetStatusData(
             lifecycle_available=lifecycle is not None,
             first_target_reached=_target_reached(
-                current_r, request.first_take_profit_r
+                current_r, assessment.adjusted_first_take_profit_r
             ),
             first_target_executed=(
                 lifecycle.first_target_executed if lifecycle is not None else False
             ),
             second_target_reached=_target_reached(
-                current_r, request.second_take_profit_r
+                current_r, assessment.adjusted_second_take_profit_r
             ),
             second_target_executed=(
                 lifecycle.second_target_executed if lifecycle is not None else False

@@ -28,15 +28,19 @@ def build_initial_profit_plan(request: ProfitPlanRequest) -> ProfitInitialPlanDa
     return ProfitInitialPlanData(
         **assessment.model_dump(),
         initial_stop=_round_price(request.position.stop_loss),
-        first_target_price=_target_price(request, request.first_take_profit_r),
-        second_target_price=_target_price(request, request.second_take_profit_r),
+        first_target_price=_target_price(
+            request, assessment.adjusted_first_take_profit_r
+        ),
+        second_target_price=_target_price(
+            request, assessment.adjusted_second_take_profit_r
+        ),
         trailing_policy=TrailingPolicyData(
             activation_r=request.break_even_trigger_r,
-            trailing_stop_pct=request.trailing_stop_pct,
+            trailing_stop_pct=assessment.adjusted_trailing_stop_pct,
         ),
         partial_exit_policy=PartialExitPolicyData(
-            first_target_r=request.first_take_profit_r,
-            second_target_r=request.second_take_profit_r,
-            partial_exit_pct=request.partial_exit_pct,
+            first_target_r=assessment.adjusted_first_take_profit_r,
+            second_target_r=assessment.adjusted_second_take_profit_r,
+            partial_exit_pct=assessment.adjusted_partial_exit_pct,
         ),
     )
