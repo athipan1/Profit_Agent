@@ -53,4 +53,5 @@ def build_exit_signal(request: ProfitPlanRequest) -> ProfitExitSignalData:
         base_trailing_stop_pct=assessment.base_trailing_stop_pct,
         adjusted_trailing_stop_pct=assessment.adjusted_trailing_stop_pct,
         adjustment_reasons=assessment.adjustment_reasons,
+        market_constraints=assessment.market_constraints,
     )

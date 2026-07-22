@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from app.models import MarketRegime, MarketRiskLevel, ProfitPlanRequest
 
 
 @dataclass(frozen=True)
 class AdaptiveProfitPolicy:
-    first_take_profit_r: float
-    second_take_profit_r: float
-    partial_exit_pct: float
-    trailing_stop_pct: float
+    first_take_profit_r: Decimal
+    second_take_profit_r: Decimal
+    partial_exit_pct: Decimal
+    trailing_stop_pct: Decimal
     source: str
     reasons: tuple[str, ...]
 
@@ -26,16 +27,20 @@ class AdaptiveProfitPolicy:
         }
 
 
-def _bounded(value: float, lower: float, upper: float) -> float:
+def _decimal(value: object) -> Decimal:
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _bounded(value: Decimal, lower: Decimal, upper: Decimal) -> Decimal:
     return min(upper, max(lower, value))
 
 
 def static_policy(request: ProfitPlanRequest) -> AdaptiveProfitPolicy:
     return AdaptiveProfitPolicy(
-        first_take_profit_r=request.first_take_profit_r,
-        second_take_profit_r=request.second_take_profit_r,
-        partial_exit_pct=request.partial_exit_pct,
-        trailing_stop_pct=request.trailing_stop_pct,
+        first_take_profit_r=_decimal(request.first_take_profit_r),
+        second_take_profit_r=_decimal(request.second_take_profit_r),
+        partial_exit_pct=_decimal(request.partial_exit_pct),
+        trailing_stop_pct=_decimal(request.trailing_stop_pct),
         source="static_v1",
         reasons=(),
     )
@@ -46,55 +51,68 @@ def evaluate_adaptive_policy(request: ProfitPlanRequest) -> AdaptiveProfitPolicy
     if context is None:
         return static_policy(request)
 
-    first_target = request.first_take_profit_r
-    second_target = request.second_take_profit_r
-    partial_exit = request.partial_exit_pct
-    trailing_stop = request.trailing_stop_pct
+    first_target = _decimal(request.first_take_profit_r)
+    second_target = _decimal(request.second_take_profit_r)
+    partial_exit = _decimal(request.partial_exit_pct)
+    trailing_stop = _decimal(request.trailing_stop_pct)
     reasons: list[str] = []
 
-    if context.regime == MarketRegime.BULL and (context.trend_strength or 0) >= 0.70:
-        trailing_stop *= 1.25
-        partial_exit *= 0.75
+    if context.regime == MarketRegime.BULL and _decimal(
+        context.trend_strength or 0
+    ) >= Decimal("0.70"):
+        trailing_stop *= Decimal("1.25")
+        partial_exit *= Decimal("0.75")
         reasons.append("bull regime with strong trend")
 
     high_volatility = (
         context.regime == MarketRegime.VOLATILE
-        or (context.volatility_percentile or 0) >= 75
-        or (context.atr_pct or 0) >= 0.04
+        or _decimal(context.volatility_percentile or 0) >= Decimal("75")
+        or _decimal(context.atr_pct or 0) >= Decimal("0.04")
     )
     if high_volatility:
         if context.atr_pct is not None:
             trailing_stop = max(
                 trailing_stop,
-                _bounded(context.atr_pct * 2.5, 0.03, 0.20),
+                _bounded(
+                    _decimal(context.atr_pct) * Decimal("2.5"),
+                    Decimal("0.03"),
+                    Decimal("0.20"),
+                ),
             )
-        partial_exit *= 1.25
+        partial_exit *= Decimal("1.25")
         reasons.append("high volatility")
 
-    if context.regime == MarketRegime.BEAR and (context.trend_strength or 0) < 0.40:
-        first_target *= 0.80
-        second_target *= 0.80
-        trailing_stop *= 0.75
-        partial_exit *= 1.25
+    if context.regime == MarketRegime.BEAR and _decimal(
+        context.trend_strength or 0
+    ) < Decimal("0.40"):
+        first_target *= Decimal("0.80")
+        second_target *= Decimal("0.80")
+        trailing_stop *= Decimal("0.75")
+        partial_exit *= Decimal("1.25")
         reasons.append("bear regime with weak trend")
 
     if context.risk_level == MarketRiskLevel.HIGH:
-        trailing_stop *= 0.85
-        partial_exit *= 1.15
+        trailing_stop *= Decimal("0.85")
+        partial_exit *= Decimal("1.15")
         reasons.append("high market risk")
 
     if context.upcoming_event_risk:
-        trailing_stop *= 0.75
-        partial_exit *= 1.25
+        trailing_stop *= Decimal("0.75")
+        partial_exit *= Decimal("1.25")
         reasons.append("upcoming event risk")
 
-    first_target = max(0.01, first_target)
-    second_target = max(first_target + 0.01, second_target)
+    quantum = Decimal("0.000001")
+    first_target = max(Decimal("0.01"), first_target)
+    second_target = max(first_target + Decimal("0.01"), second_target)
     return AdaptiveProfitPolicy(
-        first_take_profit_r=round(first_target, 6),
-        second_take_profit_r=round(second_target, 6),
-        partial_exit_pct=round(_bounded(partial_exit, 0.000001, 1), 6),
-        trailing_stop_pct=round(_bounded(trailing_stop, 0.000001, 1), 6),
+        first_take_profit_r=first_target.quantize(quantum),
+        second_take_profit_r=second_target.quantize(quantum),
+        partial_exit_pct=_bounded(
+            partial_exit, Decimal("0.000001"), Decimal("1")
+        ).quantize(quantum),
+        trailing_stop_pct=_bounded(
+            trailing_stop, Decimal("0.000001"), Decimal("1")
+        ).quantize(quantum),
         source="deterministic_adaptive_v1",
         reasons=tuple(reasons),
     )

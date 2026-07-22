@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.config import market_data_max_age_seconds
@@ -19,64 +20,133 @@ HIGHEST_PRICE_FALLBACK_WARNING = (
 )
 
 
-def _round_price(value: Optional[float]) -> Optional[float]:
+def _decimal(value: Any) -> Decimal:
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _floor_to_increment(value: Decimal, increment: Decimal) -> Decimal:
+    units = (value / increment).to_integral_value(rounding=ROUND_DOWN)
+    return units * increment
+
+
+def round_price_to_market(
+    request: ProfitPlanRequest,
+    value: Optional[Decimal | float],
+) -> Optional[float]:
     if value is None:
         return None
-    return round(value, 2)
+    rounded = _floor_to_increment(
+        _decimal(value), request.market_constraints.price_increment
+    )
+    return float(rounded)
 
 
-def _r_multiple(request: ProfitPlanRequest) -> Optional[float]:
-    position = request.position
-    if not position.risk_per_share or position.risk_per_share <= 0:
+def _round_quantity(
+    request: ProfitPlanRequest,
+    value: Decimal | float,
+) -> Optional[float]:
+    constraints = request.market_constraints
+    remaining = _decimal(
+        request.lifecycle.remaining_quantity
+        if request.lifecycle is not None
+        else request.position.quantity
+    )
+    rounded = min(
+        remaining,
+        _floor_to_increment(_decimal(value), constraints.quantity_increment),
+    )
+    if rounded < constraints.minimum_order_quantity:
         return None
-    return (position.current_price - position.entry_price) / position.risk_per_share
+    return float(rounded)
+
+
+def _exit_quantity(request: ProfitPlanRequest) -> float:
+    quantity = _round_quantity(request, _decimal(request.position.quantity))
+    if quantity is None:
+        raise ValueError("remaining quantity is below market minimum")
+    return quantity
+
+
+def _r_output(value: Optional[Decimal]) -> Optional[float]:
+    return None if value is None else float(value.quantize(Decimal("0.0001")))
+
+
+def _unrealized_pl_pct(request: ProfitPlanRequest) -> float:
+    position = request.position
+    value = (
+        _decimal(position.current_price) - _decimal(position.entry_price)
+    ) / _decimal(position.entry_price)
+    return float(value.quantize(Decimal("0.000001")))
+
+
+def _r_multiple(request: ProfitPlanRequest) -> Optional[Decimal]:
+    position = request.position
+    if not position.risk_per_share or _decimal(position.risk_per_share) <= 0:
+        return None
+    return (
+        _decimal(position.current_price) - _decimal(position.entry_price)
+    ) / _decimal(position.risk_per_share)
 
 
 def _break_even_stop(
     request: ProfitPlanRequest,
-    current_r: Optional[float],
-) -> Optional[float]:
+    current_r: Optional[Decimal],
+) -> Optional[Decimal]:
     position = request.position
-    if current_r is None or current_r < request.break_even_trigger_r:
+    if current_r is None or current_r < _decimal(request.break_even_trigger_r):
         return None
-    existing_stop = position.stop_loss or 0
-    return max(existing_stop, position.entry_price)
+    existing_stop = _decimal(position.stop_loss or 0)
+    return max(existing_stop, _decimal(position.entry_price))
+
+
+def _raw_trailing_stop_decimal(
+    request: ProfitPlanRequest,
+    current_r: Optional[Decimal | float],
+) -> Optional[Decimal]:
+    """Calculate the active trailing threshold without hiding a breach."""
+    position = request.position
+    if current_r is None or _decimal(current_r) < _decimal(
+        request.break_even_trigger_r
+    ):
+        return None
+    if not position.highest_price_since_entry:
+        return None
+    return _decimal(position.highest_price_since_entry) * (
+        Decimal("1") - _decimal(request.trailing_stop_pct)
+    )
 
 
 def calculate_raw_trailing_stop(
     request: ProfitPlanRequest,
-    current_r: Optional[float],
+    current_r: Optional[Decimal | float],
 ) -> Optional[float]:
-    """Calculate the active trailing threshold without hiding a breach."""
-    position = request.position
-    if current_r is None or current_r < request.break_even_trigger_r:
-        return None
-    if not position.highest_price_since_entry:
-        return None
-    return position.highest_price_since_entry * (1 - request.trailing_stop_pct)
+    """Compatibility projection; all underlying arithmetic is Decimal."""
+    value = _raw_trailing_stop_decimal(request, current_r)
+    return None if value is None else float(value)
 
 
 def detect_trailing_stop_breach(
     request: ProfitPlanRequest,
-    raw_trailing_stop: Optional[float],
+    raw_trailing_stop: Optional[Decimal | float],
 ) -> bool:
     """Treat equality as a breach, matching hard stop-loss semantics."""
-    return (
-        raw_trailing_stop is not None
-        and request.position.current_price <= raw_trailing_stop
-    )
+    return raw_trailing_stop is not None and _decimal(
+        request.position.current_price
+    ) <= _decimal(raw_trailing_stop)
 
 
 def calculate_recommended_stop(
     request: ProfitPlanRequest,
     *,
-    break_even_stop: Optional[float],
-    raw_trailing_stop: Optional[float],
-) -> Optional[float]:
+    break_even_stop: Optional[Decimal],
+    raw_trailing_stop: Optional[Decimal],
+) -> Optional[Decimal]:
     candidates = [
         value
         for value in (
-            request.position.stop_loss,
+            _decimal(request.position.stop_loss)
+            if request.position.stop_loss is not None
+            else None,
             break_even_stop,
             raw_trailing_stop,
         )
@@ -136,7 +206,7 @@ def _quality_block_reason(
 def _review_plan(
     request: ProfitPlanRequest,
     *,
-    current_r: Optional[float],
+    current_r: Optional[Decimal],
     warnings: List[str],
     quality: Dict[str, bool],
     reason: str,
@@ -147,8 +217,8 @@ def _review_plan(
     review_warnings = _unique_warnings([*warnings, reason])
     return ProfitPlanData(
         symbol=position.symbol.upper(),
-        current_r_multiple=None if current_r is None else round(current_r, 4),
-        unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+        current_r_multiple=_r_output(current_r),
+        unrealized_pl_pct=_unrealized_pl_pct(request),
         primary_action=ProfitAction.REVIEW,
         actions=[
             ProfitActionItem(
@@ -166,6 +236,7 @@ def _review_plan(
         advisory_only=True,
         decision_status="blocked",
         data_quality=quality,
+        market_constraints=request.market_constraints,
         metadata={
             "advisory_only": True,
             "requires_risk_approval": False,
@@ -199,25 +270,28 @@ def _decision_fields(
 
 def _pending_profit_target(
     request: ProfitPlanRequest,
-    current_r: Optional[float],
+    current_r: Optional[Decimal],
 ) -> Tuple[Optional[str], Optional[str]]:
     """Return only the next unexecuted target for a lifecycle-aware request."""
     if current_r is None:
         return None, None
     lifecycle = request.lifecycle
     if lifecycle is None:
-        if current_r >= request.second_take_profit_r:
+        if current_r >= _decimal(request.second_take_profit_r):
             return "second_take_profit", "second_take_profit"
-        if current_r >= request.first_take_profit_r:
+        if current_r >= _decimal(request.first_take_profit_r):
             return "first_take_profit", "first_take_profit"
         return None, None
 
     # Targets are intentionally sequential. Crossing both targets initially
     # proposes TP1 first; TP2 can only be proposed after TP1 is confirmed by DB.
-    if current_r >= request.first_take_profit_r and not lifecycle.first_target_executed:
+    if (
+        current_r >= _decimal(request.first_take_profit_r)
+        and not lifecycle.first_target_executed
+    ):
         return "first_take_profit", "first_take_profit"
     if (
-        current_r >= request.second_take_profit_r
+        current_r >= _decimal(request.second_take_profit_r)
         and lifecycle.first_target_executed
         and not lifecycle.second_target_executed
     ):
@@ -244,13 +318,15 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
 
     # Hard stop-loss safety has priority over every profit calculation.
-    if position.stop_loss is not None and position.current_price <= position.stop_loss:
+    if position.stop_loss is not None and _decimal(position.current_price) <= _decimal(
+        position.stop_loss
+    ):
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.EXIT_ALL,
                 symbol=position.symbol.upper(),
-                quantity=position.quantity,
-                recommended_stop=position.stop_loss,
+                quantity=_exit_quantity(request),
+                recommended_stop=round_price_to_market(request, position.stop_loss),
                 reason="Current price is at or below stop loss",
                 confidence_score=0.90,
                 metadata={
@@ -263,12 +339,12 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         return ProfitPlanData(
             symbol=position.symbol.upper(),
             current_r_multiple=None,
-            unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+            unrealized_pl_pct=_unrealized_pl_pct(request),
             primary_action=ProfitAction.EXIT_ALL,
             actions=actions,
             warnings=warnings,
             trigger="hard_stop_loss_breach",
-            recommended_stop=_round_price(position.stop_loss),
+            recommended_stop=round_price_to_market(request, position.stop_loss),
             requires_risk_approval=True,
             advisory_only=True,
             metadata={
@@ -277,6 +353,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 "request_metadata": request.metadata,
             },
             data_quality=quality,
+            market_constraints=request.market_constraints,
             **base_policy.response_fields(request),
             **_decision_fields(
                 request,
@@ -295,14 +372,14 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
 
     # Keep the raw threshold even when price has crossed it; a breach is an exit signal.
-    raw_trailing_stop = calculate_raw_trailing_stop(request, current_r)
+    raw_trailing_stop = _raw_trailing_stop_decimal(request, current_r)
     if detect_trailing_stop_breach(request, raw_trailing_stop):
-        recommended_stop = _round_price(raw_trailing_stop)
+        recommended_stop = round_price_to_market(request, raw_trailing_stop)
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.EXIT_ALL,
                 symbol=position.symbol.upper(),
-                quantity=position.quantity,
+                quantity=_exit_quantity(request),
                 recommended_stop=recommended_stop,
                 reason="Current price is at or below the active trailing stop",
                 confidence_score=0.92,
@@ -315,8 +392,8 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
         return ProfitPlanData(
             symbol=position.symbol.upper(),
-            current_r_multiple=None if current_r is None else round(current_r, 4),
-            unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+            current_r_multiple=_r_output(current_r),
+            unrealized_pl_pct=_unrealized_pl_pct(request),
             primary_action=ProfitAction.EXIT_ALL,
             actions=actions,
             warnings=warnings,
@@ -331,6 +408,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 "request_metadata": request.metadata,
             },
             data_quality=quality,
+            market_constraints=request.market_constraints,
             **base_policy.response_fields(request),
             **_decision_fields(
                 request,
@@ -353,6 +431,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
 
     policy = evaluate_adaptive_policy(request)
     policy_fields = policy.response_fields(request)
+    policy_request = request
     effective_request = request.model_copy(
         update={
             "first_take_profit_r": policy.first_take_profit_r,
@@ -361,14 +440,14 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             "trailing_stop_pct": policy.trailing_stop_pct,
         }
     )
-    adjusted_trailing_stop = calculate_raw_trailing_stop(effective_request, current_r)
+    adjusted_trailing_stop = _raw_trailing_stop_decimal(effective_request, current_r)
     if detect_trailing_stop_breach(effective_request, adjusted_trailing_stop):
-        recommended_stop = _round_price(adjusted_trailing_stop)
+        recommended_stop = round_price_to_market(request, adjusted_trailing_stop)
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.EXIT_ALL,
                 symbol=position.symbol.upper(),
-                quantity=position.quantity,
+                quantity=_exit_quantity(request),
                 recommended_stop=recommended_stop,
                 reason="Current price is at or below the adaptive trailing stop",
                 confidence_score=0.92,
@@ -382,8 +461,8 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         )
         return ProfitPlanData(
             symbol=position.symbol.upper(),
-            current_r_multiple=None if current_r is None else round(current_r, 4),
-            unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+            current_r_multiple=_r_output(current_r),
+            unrealized_pl_pct=_unrealized_pl_pct(request),
             primary_action=ProfitAction.EXIT_ALL,
             actions=actions,
             warnings=warnings,
@@ -392,6 +471,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             requires_risk_approval=True,
             advisory_only=True,
             data_quality=quality,
+            market_constraints=request.market_constraints,
             metadata={
                 "advisory_only": True,
                 "requires_risk_approval": True,
@@ -417,31 +497,57 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
     )
     if break_even_stop is not None or raw_trailing_stop is not None:
         if position.stop_loss is None or (
-            recommended_stop is not None and recommended_stop > position.stop_loss
+            recommended_stop is not None
+            and recommended_stop > _decimal(position.stop_loss)
         ):
             actions.append(
                 ProfitActionItem(
                     action=ProfitAction.MOVE_STOP,
                     symbol=position.symbol.upper(),
                     quantity=0,
-                    recommended_stop=_round_price(recommended_stop),
+                    recommended_stop=round_price_to_market(request, recommended_stop),
                     reason="Move stop to lock profit or reduce downside risk",
                     confidence_score=0.72,
                     metadata={
-                        "break_even_stop": _round_price(break_even_stop),
-                        "trailing_stop": _round_price(raw_trailing_stop),
+                        "break_even_stop": round_price_to_market(
+                            request, break_even_stop
+                        ),
+                        "trailing_stop": round_price_to_market(
+                            request, raw_trailing_stop
+                        ),
                     },
                 )
             )
 
     trigger, decision_type = _pending_profit_target(request, current_r)
+    partial_quantity = (
+        _round_quantity(
+            request,
+            _decimal(position.quantity) * _decimal(request.partial_exit_pct),
+        )
+        if trigger in {"first_take_profit", "second_take_profit"}
+        else None
+    )
+    if trigger is not None and partial_quantity is None:
+        return _review_plan(
+            policy_request,
+            current_r=current_r,
+            warnings=warnings,
+            quality=quality,
+            reason=(
+                "calculated partial exit is below minimum_order_quantity after "
+                "quantity-increment rounding"
+            ),
+            trigger="partial_exit_below_market_minimum",
+            policy=policy,
+        )
     if trigger == "second_take_profit":
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.PARTIAL_EXIT,
                 symbol=position.symbol.upper(),
-                quantity=round(position.quantity * request.partial_exit_pct, 6),
-                recommended_stop=_round_price(recommended_stop),
+                quantity=partial_quantity,
+                recommended_stop=round_price_to_market(request, recommended_stop),
                 reason=(
                     "Position reached second take-profit target at "
                     f"{request.second_take_profit_r}R"
@@ -454,8 +560,8 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             ProfitActionItem(
                 action=ProfitAction.PARTIAL_EXIT,
                 symbol=position.symbol.upper(),
-                quantity=round(position.quantity * request.partial_exit_pct, 6),
-                recommended_stop=_round_price(recommended_stop),
+                quantity=partial_quantity,
+                recommended_stop=round_price_to_market(request, recommended_stop),
                 reason=(
                     "Position reached first take-profit target at "
                     f"{request.first_take_profit_r}R"
@@ -470,7 +576,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 action=ProfitAction.HOLD,
                 symbol=position.symbol.upper(),
                 quantity=0,
-                recommended_stop=_round_price(recommended_stop),
+                recommended_stop=round_price_to_market(request, recommended_stop),
                 reason="No take-profit or exit condition is triggered",
                 confidence_score=0.65,
             )
@@ -505,13 +611,13 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         decision_fields = {}
     return ProfitPlanData(
         symbol=position.symbol.upper(),
-        current_r_multiple=None if current_r is None else round(current_r, 4),
-        unrealized_pl_pct=round(position.unrealized_pl_pct or 0.0, 6),
+        current_r_multiple=_r_output(current_r),
+        unrealized_pl_pct=_unrealized_pl_pct(request),
         primary_action=primary_action,
         actions=actions,
         warnings=warnings,
         trigger=trigger,
-        recommended_stop=_round_price(recommended_stop),
+        recommended_stop=round_price_to_market(request, recommended_stop),
         requires_risk_approval=requires_risk_approval,
         advisory_only=True,
         metadata={
@@ -521,10 +627,11 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             "second_take_profit_r": request.second_take_profit_r,
             "partial_exit_pct": request.partial_exit_pct,
             "trailing_stop_pct": request.trailing_stop_pct,
-            "raw_trailing_stop": _round_price(raw_trailing_stop),
+            "raw_trailing_stop": round_price_to_market(request, raw_trailing_stop),
             "request_metadata": request.metadata,
         },
         data_quality=quality,
+        market_constraints=request.market_constraints,
         **policy_fields,
         **decision_fields,
     )
