@@ -11,6 +11,7 @@ It does **not** place sell orders. It returns suggested actions for `Manager_Age
 - Recommend break-even stop movement
 - Recommend trailing stop movement
 - Recommend partial take profit
+- Suppress already executed take-profit stages using Database-owned lifecycle state
 - Return advisory exit signal metadata
 
 Hard stop-loss and active trailing-stop breaches always take priority over
@@ -89,6 +90,26 @@ Example response fields:
   "warnings": []
 }
 ```
+
+For idempotent orchestration, include the current lifecycle from
+`Database_Agent`:
+
+```json
+{
+  "lifecycle": {
+    "position_id": "account-1:position-42",
+    "position_version": 7,
+    "first_target_executed": false,
+    "second_target_executed": false,
+    "total_exited_quantity": 0,
+    "remaining_quantity": 20
+  }
+}
+```
+
+Profit_Agent then returns a deterministic `decision_id`. It does not update the
+lifecycle itself; `Manager_Agent` must reserve the decision and only ask
+`Database_Agent` to mark a target executed after a confirmed fill.
 
 ## Endpoints
 

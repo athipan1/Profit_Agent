@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.models import ProfitAction, ProfitActionItem, ProfitPlanData, ProfitPlanRequest
 
@@ -91,6 +91,59 @@ def _base_warnings(request: ProfitPlanRequest) -> List[str]:
     return _unique_warnings(warnings)
 
 
+def _decision_fields(
+    request: ProfitPlanRequest,
+    *,
+    decision_type: Optional[str],
+    suffix: Optional[str],
+    next_lifecycle_state: Optional[Dict[str, bool]] = None,
+) -> Dict[str, Any]:
+    """Build a deterministic identity without owning or mutating lifecycle state."""
+    lifecycle = request.lifecycle
+    if lifecycle is None or decision_type is None or suffix is None:
+        return {}
+    return {
+        "decision_id": (
+            f"profit:{lifecycle.position_id}:{request.position.symbol.upper()}:"
+            f"v{lifecycle.position_version}:{suffix}"
+        ),
+        "decision_type": decision_type,
+        "position_version": lifecycle.position_version,
+        "next_lifecycle_state": next_lifecycle_state or {},
+    }
+
+
+def _pending_profit_target(
+    request: ProfitPlanRequest,
+    current_r: Optional[float],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return only the next unexecuted target for a lifecycle-aware request."""
+    if current_r is None:
+        return None, None
+    lifecycle = request.lifecycle
+    if lifecycle is None:
+        if current_r >= request.second_take_profit_r:
+            return "second_take_profit", "second_take_profit"
+        if current_r >= request.first_take_profit_r:
+            return "first_take_profit", "first_take_profit"
+        return None, None
+
+    # Targets are intentionally sequential. Crossing both targets initially
+    # proposes TP1 first; TP2 can only be proposed after TP1 is confirmed by DB.
+    if (
+        current_r >= request.first_take_profit_r
+        and not lifecycle.first_target_executed
+    ):
+        return "first_take_profit", "first_take_profit"
+    if (
+        current_r >= request.second_take_profit_r
+        and lifecycle.first_target_executed
+        and not lifecycle.second_target_executed
+    ):
+        return "second_take_profit", "second_take_profit"
+    return None, None
+
+
 def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
     position = request.position
     actions: List[ProfitActionItem] = []
@@ -129,6 +182,11 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 "requires_risk_approval": True,
                 "request_metadata": request.metadata,
             },
+            **_decision_fields(
+                request,
+                decision_type="hard_stop_exit",
+                suffix="hard-stop",
+            ),
         )
 
     current_r = _r_multiple(request)
@@ -176,6 +234,11 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 "raw_trailing_stop": recommended_stop,
                 "request_metadata": request.metadata,
             },
+            **_decision_fields(
+                request,
+                decision_type="trailing_stop_exit",
+                suffix="trailing-stop",
+            ),
         )
 
     break_even_stop = _break_even_stop(request, current_r)
@@ -203,9 +266,8 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 )
             )
 
-    trigger = None
-    if current_r is not None and current_r >= request.second_take_profit_r:
-        trigger = "second_take_profit"
+    trigger, decision_type = _pending_profit_target(request, current_r)
+    if trigger == "second_take_profit":
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.PARTIAL_EXIT,
@@ -219,8 +281,7 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
                 confidence_score=0.82,
             )
         )
-    elif current_r is not None and current_r >= request.first_take_profit_r:
-        trigger = "first_take_profit"
+    elif trigger == "first_take_profit":
         actions.append(
             ProfitActionItem(
                 action=ProfitAction.PARTIAL_EXIT,
@@ -256,6 +317,28 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
         actions[0].action,
     )
     requires_risk_approval = primary_action != ProfitAction.HOLD
+    if decision_type == "first_take_profit":
+        decision_fields = _decision_fields(
+            request,
+            decision_type=decision_type,
+            suffix="tp1",
+            next_lifecycle_state={"first_target_executed": True},
+        )
+    elif decision_type == "second_take_profit":
+        decision_fields = _decision_fields(
+            request,
+            decision_type=decision_type,
+            suffix="tp2",
+            next_lifecycle_state={"second_target_executed": True},
+        )
+    elif primary_action == ProfitAction.MOVE_STOP:
+        decision_fields = _decision_fields(
+            request,
+            decision_type="stop_adjustment",
+            suffix="stop-adjustment",
+        )
+    else:
+        decision_fields = {}
     return ProfitPlanData(
         symbol=position.symbol.upper(),
         current_r_multiple=None if current_r is None else round(current_r, 4),
@@ -277,4 +360,5 @@ def build_profit_plan(request: ProfitPlanRequest) -> ProfitPlanData:
             "raw_trailing_stop": _round_price(raw_trailing_stop),
             "request_metadata": request.metadata,
         },
+        **decision_fields,
     )

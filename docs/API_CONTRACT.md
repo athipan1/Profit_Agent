@@ -87,6 +87,47 @@ When all risk inputs are supplied, `risk_per_share` must be approximately
 `entry_price - stop_loss`. `PROFIT_RISK_MISMATCH_POLICY` supports `reject`,
 `warn`, and `recalculate`; it defaults to `reject`.
 
+## Position lifecycle and idempotency
+
+During the v1-to-v2 migration, callers may add Database-owned lifecycle state:
+
+```json
+{
+  "lifecycle": {
+    "position_id": "account-1:position-42",
+    "position_version": 7,
+    "first_target_executed": false,
+    "second_target_executed": false,
+    "total_exited_quantity": 0,
+    "remaining_quantity": 10
+  }
+}
+```
+
+For an actionable lifecycle-aware recommendation, Profit_Agent returns a
+deterministic `decision_id`, `decision_type`, the evaluated
+`position_version`, and a proposed `next_lifecycle_state`. For example:
+
+```json
+{
+  "decision_id": "profit:account-1:position-42:ACGL:v7:tp1",
+  "decision_type": "first_take_profit",
+  "position_version": 7,
+  "next_lifecycle_state": {"first_target_executed": true}
+}
+```
+
+Target flags are facts supplied by Database_Agent. Profit_Agent never persists
+or mutates them. It proposes TP1 first even when both thresholds were crossed,
+does not propose an already executed target, and only proposes TP2 after TP1 is
+confirmed. Manager must reserve the decision in Database_Agent, pass it through
+Risk_Agent, and update target state only after broker-confirmed execution.
+
+`lifecycle.remaining_quantity` must match `position.quantity`, and TP2 cannot be
+marked executed while TP1 is false. Lifecycle omission remains temporarily
+accepted for the legacy `profit-plan.v1` migration path; such responses do not
+contain an idempotency identity and must not be auto-executed.
+
 ## Position Peak Contract
 
 The caller is responsible for sending the highest observed market price for the current position lifecycle:

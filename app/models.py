@@ -16,6 +16,7 @@ RISK_MISMATCH_POLICIES = {"reject", "warn", "recalculate"}
 RISK_MISMATCH_REL_TOL = 1e-6
 RISK_MISMATCH_ABS_TOL = 1e-6
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9.-]{0,14}$")
+POSITION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$")
 
 
 class StrictModel(BaseModel):
@@ -124,8 +125,37 @@ class ProfitPosition(StrictModel):
         return self._risk_per_share_warning
 
 
+class ProfitLifecycle(StrictModel):
+    """Database-owned state for one open-position lifecycle."""
+
+    position_id: str
+    position_version: int = Field(ge=1)
+    first_target_executed: bool = False
+    second_target_executed: bool = False
+    total_exited_quantity: float = Field(default=0, ge=0)
+    remaining_quantity: float = Field(gt=0)
+
+    @field_validator("position_id", mode="before")
+    @classmethod
+    def validate_position_id(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            raise ValueError("position_id must be a string")
+        if value != value.strip() or not POSITION_ID_PATTERN.fullmatch(value):
+            raise ValueError("position_id has an invalid format")
+        return value
+
+    @model_validator(mode="after")
+    def validate_target_sequence(self) -> "ProfitLifecycle":
+        if self.second_target_executed and not self.first_target_executed:
+            raise ValueError(
+                "second_target_executed requires first_target_executed"
+            )
+        return self
+
+
 class ProfitPlanRequest(StrictModel):
     position: ProfitPosition
+    lifecycle: Optional[ProfitLifecycle] = None
     first_take_profit_r: float = Field(default=2.0, gt=0)
     second_take_profit_r: float = Field(default=3.0, gt=0)
     partial_exit_pct: float = Field(default=0.30, gt=0, le=1)
@@ -139,6 +169,15 @@ class ProfitPlanRequest(StrictModel):
     def validate_target_ordering(self) -> "ProfitPlanRequest":
         if self.second_take_profit_r <= self.first_take_profit_r:
             raise ValueError("second_take_profit_r must be greater than first_take_profit_r")
+        if self.lifecycle is not None and not math.isclose(
+            self.lifecycle.remaining_quantity,
+            self.position.quantity,
+            rel_tol=RISK_MISMATCH_REL_TOL,
+            abs_tol=RISK_MISMATCH_ABS_TOL,
+        ):
+            raise ValueError(
+                "lifecycle.remaining_quantity must match position.quantity"
+            )
         return self
 
 
@@ -164,6 +203,10 @@ class ProfitPlanData(StrictModel):
     recommended_stop: Optional[float] = None
     requires_risk_approval: bool = False
     advisory_only: bool = True
+    decision_id: Optional[str] = None
+    decision_type: Optional[str] = None
+    position_version: Optional[int] = None
+    next_lifecycle_state: Dict[str, bool] = Field(default_factory=dict)
 
 
 class HealthData(StrictModel):
